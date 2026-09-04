@@ -1,7 +1,7 @@
 // ------------------------------------------------------------
 // 🔑 आपका Master Bot Token – यहाँ अपना नया Token डालें
 // ------------------------------------------------------------
-const MASTER_BOT_TOKEN = '8464608757:AAGbBQl5BLNP0mGNB3CdGkTxpo2di5X5xl0';  // <-- @BotFather से लें
+const MASTER_BOT_TOKEN = '8625601415:AAGIOdTkHOznIz_VlnehzsgvZpxXJG37O0Y';  // <-- @BotFather से लें
 
 // ------------------------------------------------------------
 // बाकी कोड – FIX: npx --yes के साथ
