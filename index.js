@@ -4,7 +4,7 @@
 const MASTER_BOT_TOKEN = '8625601415:AAGIOdTkHOznIz_VlnehzsgvZpxXJG37O0Y';  // <-- @BotFather से लें
 
 // ------------------------------------------------------------
-// बाकी कोड – FIX: npx --yes के साथ
+// बाकी कोड – STABLE: अब init और up को एक साथ कर रहा है
 // ------------------------------------------------------------
 const { Telegraf, Markup } = require('telegraf');
 const fs = require('fs/promises');
@@ -21,15 +21,14 @@ const bot = new Telegraf(MASTER_BOT_TOKEN);
 const sessions = new Map();
 
 // ------------------------------------------------------------
-// 🛠️ FIXED: npx --yes (Auto-Install without prompt)
+// 🛠️ Railway CLI – STDIN बंद, 120 सेकंड Timeout, npx --yes
 // ------------------------------------------------------------
 const runRailwayCmd = (token, args, cwd) => {
   return new Promise((resolve, reject) => {
-    // 🔥 --yes डाला – अब Prompt नहीं आएगा
     const child = spawn('npx', ['--yes', 'railway', ...args], {
       cwd,
       env: { ...process.env, RAILWAY_TOKEN: token },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe'], // 🔥 STDIN बंद
     });
 
     let stdout = '', stderr = '';
@@ -37,7 +36,7 @@ const runRailwayCmd = (token, args, cwd) => {
     child.stdout.on('data', (data) => { stdout += data.toString(); });
     child.stderr.on('data', (data) => { stderr += data.toString(); });
 
-    // Timeout 120s
+    // 🔥 120 सेकंड Timeout
     const timeout = setTimeout(() => {
       child.kill();
       reject(new Error(`Command timed out after 120s: railway ${args.join(' ')}`));
@@ -142,7 +141,7 @@ const showMainMenu = async (ctx, session, projectsList = null) => {
 };
 
 // ------------------------------------------------------------
-// 🚀 NON-BLOCKING DEPLOYMENT
+// 🚀 FIXED DEPLOYMENT – अब init/link नहीं, सीधा 'up'
 // ------------------------------------------------------------
 const executeDeployment = (ctx, session) => {
   const userId = ctx.from.id;
@@ -152,6 +151,7 @@ const executeDeployment = (ctx, session) => {
 
   (async () => {
     try {
+      // 1. Temp folder बनाओ और Files Save करो
       await fs.mkdir(tempDir, { recursive: true });
       for (const [name, content] of Object.entries(session.files)) {
         await fs.writeFile(path.join(tempDir, name), content);
@@ -160,14 +160,16 @@ const executeDeployment = (ctx, session) => {
       const projectName = `tb_${userId}_${Date.now()}`;
       const projectId = session.deployTargetProject;
 
+      // 2. 🔥 MAGIC FIX: init और up को एक साथ करो
       if (projectId) {
-        await runRailwayCmd(session.railwayToken, ['link', projectId], tempDir);
+        // Existing Project: सीधा --project के साथ up
+        await runRailwayCmd(session.railwayToken, ['up', '--project', projectId], tempDir);
       } else {
-        await runRailwayCmd(session.railwayToken, ['init', '-n', projectName], tempDir);
+        // New Project: -n (name) के साथ up – यह init+up एक साथ करता है
+        await runRailwayCmd(session.railwayToken, ['up', '-n', projectName], tempDir);
       }
 
-      await runRailwayCmd(session.railwayToken, ['up', '--detach'], tempDir);
-
+      // 3. Cleanup
       await fs.rm(tempDir, { recursive: true, force: true });
 
       await ctx.reply('✅ *Deployment triggered successfully!* Your bot will be live shortly on Railway.', { parse_mode: 'Markdown' });
