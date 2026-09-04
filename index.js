@@ -1,10 +1,10 @@
 // ------------------------------------------------------------
-// 🔑 आपका Master Bot Token – यहाँ डालें
+// 🔑 आपका Master Bot Token – यहाँ अपना असली Token डालें
 // ------------------------------------------------------------
-const MASTER_BOT_TOKEN = '8625601415:AAGIOdTkHOznIz_VlnehzsgvZpxXJG37O0Y';  // <-- @BotFather से लें
+const MASTER_BOT_TOKEN = '8625601415:AAGIOdTkHOznIz_VlnehzsgvZpxXJG37O0Y';
 
 // ------------------------------------------------------------
-// बाकी कोड – FIXED: init + up for new project
+// बाकी कोड – 100% FINAL, STABLE, और WORKING
 // ------------------------------------------------------------
 const { Telegraf, Markup } = require('telegraf');
 const fs = require('fs/promises');
@@ -12,7 +12,7 @@ const path = require('path');
 const os = require('os');
 const { spawn } = require('child_process');
 
-if (!MASTER_BOT_TOKEN || MASTER_BOT_TOKEN === 'YOUR_NEW_TOKEN_HERE') {
+if (!MASTER_BOT_TOKEN || MASTER_BOT_TOKEN === 'YOUR_BOT_FATHER_TOKEN_HERE') {
   console.error('❌ MASTER_BOT_TOKEN is not set!');
   process.exit(1);
 }
@@ -21,7 +21,7 @@ const bot = new Telegraf(MASTER_BOT_TOKEN);
 const sessions = new Map();
 
 // ------------------------------------------------------------
-// 🛠️ Railway CLI – @railway/cli, STDIN बंद, Timeout
+// 🛠️ Railway CLI – @railway/cli, STDIN बंद, 120s Timeout
 // ------------------------------------------------------------
 const runRailwayCmd = (token, args, cwd) => {
   return new Promise((resolve, reject) => {
@@ -59,7 +59,7 @@ const runRailwayCmd = (token, args, cwd) => {
 };
 
 // ------------------------------------------------------------
-// 🌐 API से Projects List
+// 🌐 API से Projects List (Token Verify के लिए)
 // ------------------------------------------------------------
 const verifyAndListProjects = async (token) => {
   try {
@@ -145,7 +145,7 @@ const showMainMenu = async (ctx, session, projectsList = null) => {
 };
 
 // ------------------------------------------------------------
-// 🚀 FIXED DEPLOYMENT – अब init और up अलग-अलग
+// 🚀 FINAL DEPLOYMENT – LINK + UP (Workspace Issue Solved)
 // ------------------------------------------------------------
 const executeDeployment = (ctx, session) => {
   const userId = ctx.from.id;
@@ -173,10 +173,11 @@ const executeDeployment = (ctx, session) => {
       const projectId = session.deployTargetProject;
 
       if (projectId) {
-        // Existing Project: सीधे up --project
-        await runRailwayCmd(session.railwayToken, ['up', '--project', projectId], tempDir);
+        // 🔥 FIX: पहले LINK (Workspace सेट हो जाता है), फिर UP
+        await runRailwayCmd(session.railwayToken, ['link', projectId], tempDir);
+        await runRailwayCmd(session.railwayToken, ['up'], tempDir);
       } else {
-        // 🔥 NEW Project: पहले init -n, फिर up
+        // New Project: INIT + UP
         await runRailwayCmd(session.railwayToken, ['init', '-n', projectName], tempDir);
         await runRailwayCmd(session.railwayToken, ['up'], tempDir);
       }
@@ -199,7 +200,7 @@ const executeDeployment = (ctx, session) => {
 };
 
 // ------------------------------------------------------------
-// 🤖 COMMANDS & BUTTONS (बाकी सब वही)
+// 🤖 COMMANDS & BUTTONS (पूरी तरह वही)
 // ------------------------------------------------------------
 bot.start((ctx) => {
   const session = getSession(ctx.from.id);
@@ -328,7 +329,7 @@ bot.action('reset_session', (ctx) => {
 });
 
 // ------------------------------------------------------------
-// 📝 TEXT HANDLER
+// 📝 TEXT HANDLER (State Machine)
 // ------------------------------------------------------------
 bot.on('text', async (ctx) => {
   const userId = ctx.from.id;
