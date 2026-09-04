@@ -1,10 +1,10 @@
 // ------------------------------------------------------------
-// 🔑 आपका Master Bot Token – यहाँ अपना नया Token डालें
+// 🔑 आपका Master Bot Token – यहाँ डालें
 // ------------------------------------------------------------
 const MASTER_BOT_TOKEN = '8625601415:AAGIOdTkHOznIz_VlnehzsgvZpxXJG37O0Y';  // <-- @BotFather से लें
 
 // ------------------------------------------------------------
-// बाकी कोड – STABLE: अब init और up को एक साथ कर रहा है
+// बाकी कोड – अब package.json Check + Better Error Logging
 // ------------------------------------------------------------
 const { Telegraf, Markup } = require('telegraf');
 const fs = require('fs/promises');
@@ -21,14 +21,14 @@ const bot = new Telegraf(MASTER_BOT_TOKEN);
 const sessions = new Map();
 
 // ------------------------------------------------------------
-// 🛠️ Railway CLI – STDIN बंद, 120 सेकंड Timeout, npx --yes
+// 🛠️ Railway CLI – STDIN बंद, 120s Timeout, --yes
 // ------------------------------------------------------------
 const runRailwayCmd = (token, args, cwd) => {
   return new Promise((resolve, reject) => {
     const child = spawn('npx', ['--yes', 'railway', ...args], {
       cwd,
       env: { ...process.env, RAILWAY_TOKEN: token },
-      stdio: ['ignore', 'pipe', 'pipe'], // 🔥 STDIN बंद
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
 
     let stdout = '', stderr = '';
@@ -36,16 +36,17 @@ const runRailwayCmd = (token, args, cwd) => {
     child.stdout.on('data', (data) => { stdout += data.toString(); });
     child.stderr.on('data', (data) => { stderr += data.toString(); });
 
-    // 🔥 120 सेकंड Timeout
     const timeout = setTimeout(() => {
       child.kill();
-      reject(new Error(`Command timed out after 120s: railway ${args.join(' ')}`));
+      reject(new Error(`⏱️ Command timed out after 120s: railway ${args.join(' ')}`));
     }, 120000);
 
     child.on('close', (code) => {
       clearTimeout(timeout);
       if (code !== 0) {
-        const errorMsg = stderr || stdout || `Command failed with code ${code}`;
+        // 🔥 अब stdout और stderr दोनों भेजो
+        const fullOutput = (stdout + '\n' + stderr).trim();
+        const errorMsg = fullOutput || `Command failed with code ${code}`;
         return reject(new Error(errorMsg));
       }
       resolve(stdout);
@@ -125,6 +126,11 @@ const showMainMenu = async (ctx, session, projectsList = null) => {
   const fileKeys = Object.keys(session.files);
   msg += `\n📁 *Your Files:* ${fileKeys.length ? fileKeys.join(', ') : '(none)'}`;
 
+  // 🔥 Important: पक्का करें कि package.json हो
+  if (!session.files['package.json'] && Object.keys(session.files).length > 0) {
+    msg += `\n\n⚠️ *Missing package.json!* Railway needs it to deploy Node.js apps.`;
+  }
+
   const buttons = [
     [Markup.button.callback('📁 Add File', 'add_file')],
     [Markup.button.callback('🗑️ Delete File', 'delete_file')],
@@ -141,17 +147,26 @@ const showMainMenu = async (ctx, session, projectsList = null) => {
 };
 
 // ------------------------------------------------------------
-// 🚀 FIXED DEPLOYMENT – अब init/link नहीं, सीधा 'up'
+// 🚀 DEPLOYMENT – अब package.json की जाँच
 // ------------------------------------------------------------
 const executeDeployment = (ctx, session) => {
   const userId = ctx.from.id;
   const tempDir = path.join(os.tmpdir(), `rd_${userId}_${Date.now()}`);
 
+  // 🔥 Check: क्या package.json मौजूद है?
+  if (!session.files['package.json']) {
+    return ctx.reply(
+      '❌ *Missing `package.json`!*\n\n' +
+      'Railway needs `package.json` to identify your project as a Node.js app.\n' +
+      'Please add a file named **package.json** using the "Add File" button, then try again.',
+      { parse_mode: 'Markdown' }
+    );
+  }
+
   ctx.reply('⏳ *Deployment started!* It will take 1-2 minutes. Check progress here (I will notify if it fails).', { parse_mode: 'Markdown' });
 
   (async () => {
     try {
-      // 1. Temp folder बनाओ और Files Save करो
       await fs.mkdir(tempDir, { recursive: true });
       for (const [name, content] of Object.entries(session.files)) {
         await fs.writeFile(path.join(tempDir, name), content);
@@ -160,16 +175,12 @@ const executeDeployment = (ctx, session) => {
       const projectName = `tb_${userId}_${Date.now()}`;
       const projectId = session.deployTargetProject;
 
-      // 2. 🔥 MAGIC FIX: init और up को एक साथ करो
       if (projectId) {
-        // Existing Project: सीधा --project के साथ up
         await runRailwayCmd(session.railwayToken, ['up', '--project', projectId], tempDir);
       } else {
-        // New Project: -n (name) के साथ up – यह init+up एक साथ करता है
         await runRailwayCmd(session.railwayToken, ['up', '-n', projectName], tempDir);
       }
 
-      // 3. Cleanup
       await fs.rm(tempDir, { recursive: true, force: true });
 
       await ctx.reply('✅ *Deployment triggered successfully!* Your bot will be live shortly on Railway.', { parse_mode: 'Markdown' });
@@ -177,7 +188,7 @@ const executeDeployment = (ctx, session) => {
     } catch (err) {
       try { await fs.rm(tempDir, { recursive: true, force: true }); } catch (e) {}
       await ctx.reply(
-        `❌ *Deployment Failed!*\n\nReason:\n\`\`\`${err.message.slice(0, 500)}\`\`\`\n\nPlease check your code files or token permissions.`,
+        `❌ *Deployment Failed!*\n\nReason:\n\`\`\`${err.message.slice(0, 600)}\`\`\`\n\n(If you see "missing package.json", please add it.)`,
         { parse_mode: 'Markdown' }
       );
     }
@@ -188,7 +199,7 @@ const executeDeployment = (ctx, session) => {
 };
 
 // ------------------------------------------------------------
-// 🤖 COMMANDS & BUTTONS (बिल्कुल वही)
+// 🤖 COMMANDS & BUTTONS (बाकी सब वही)
 // ------------------------------------------------------------
 bot.start((ctx) => {
   const session = getSession(ctx.from.id);
@@ -244,7 +255,7 @@ bot.action('add_file', (ctx) => {
   session.stage = 'waiting_filename';
   session.fileChunks = [];
   ctx.reply(
-    `✏️ Enter the *filename* (e.g., \`index.js\`, \`main.py\`).\n\nAfter this, paste your code in parts.\nWhen finished, type \`DONE\`.`,
+    `✏️ Enter the *filename* (e.g., \`index.js\`, \`package.json\`).\n\nAfter this, paste your code in parts.\nWhen finished, type \`DONE\`.`,
     { parse_mode: 'Markdown' }
   );
   ctx.answerCbQuery();
