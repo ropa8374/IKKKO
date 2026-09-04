@@ -4,7 +4,7 @@
 const MASTER_BOT_TOKEN = '8625601415:AAGIOdTkHOznIz_VlnehzsgvZpxXJG37O0Y';
 
 // ------------------------------------------------------------
-// बाकी कोड – 100% FINAL, STABLE, और WORKING
+// बाकी कोड – FIXED VERSION
 // ------------------------------------------------------------
 const { Telegraf, Markup } = require('telegraf');
 const fs = require('fs/promises');
@@ -145,7 +145,7 @@ const showMainMenu = async (ctx, session, projectsList = null) => {
 };
 
 // ------------------------------------------------------------
-// 🚀 FINAL DEPLOYMENT – LINK + UP (Workspace Issue Solved)
+// 🚀 FINAL DEPLOYMENT – LINK + UP
 // ------------------------------------------------------------
 const executeDeployment = (ctx, session) => {
   const userId = ctx.from.id;
@@ -173,8 +173,9 @@ const executeDeployment = (ctx, session) => {
       const projectId = session.deployTargetProject;
 
       if (projectId) {
-        // 🔥 FIX: पहले LINK (Workspace सेट हो जाता है), फिर UP
-        await runRailwayCmd(session.railwayToken, ['link', projectId], tempDir);
+        // FIX: पहले LINK (Workspace सेट हो जाता है), फिर UP
+        // --project flag दिया गया है ताकि interactive prompt में न फँसे
+        await runRailwayCmd(session.railwayToken, ['link', '--project', projectId], tempDir);
         await runRailwayCmd(session.railwayToken, ['up'], tempDir);
       } else {
         // New Project: INIT + UP
@@ -200,7 +201,7 @@ const executeDeployment = (ctx, session) => {
 };
 
 // ------------------------------------------------------------
-// 🤖 COMMANDS & BUTTONS (पूरी तरह वही)
+// 🤖 COMMANDS & BUTTONS
 // ------------------------------------------------------------
 bot.start((ctx) => {
   const session = getSession(ctx.from.id);
@@ -329,13 +330,17 @@ bot.action('reset_session', (ctx) => {
 });
 
 // ------------------------------------------------------------
-// 📝 TEXT HANDLER (State Machine)
+// 📝 TEXT HANDLER (State Machine) — FIXED
 // ------------------------------------------------------------
 bot.on('text', async (ctx) => {
   const userId = ctx.from.id;
   const session = getSession(userId);
-  const text = ctx.message.text.trim();
-  if (text.startsWith('/')) return;
+  const rawText = ctx.message.text;
+  const text = rawText.trim();
+
+  // FIX #1: slash-command check अब सिर्फ़ तभी लगेगा जब हम code collect नहीं
+  // कर रहे — वरना "// comment" वाली lines silently drop हो जाती थीं।
+  if (session.stage !== 'waiting_code' && text.startsWith('/')) return;
 
   if (session.stage === 'waiting_token') {
     session.railwayToken = text;
@@ -357,8 +362,10 @@ bot.on('text', async (ctx) => {
     ctx.reply(`📄 Now send content of \`${text}\`. Type \`DONE\` when finished.`, { parse_mode: 'Markdown' });
   }
   else if (session.stage === 'waiting_code') {
+    // DONE की जाँच trimmed text पर, पर actual content raw (untrimmed) रखते हैं
     if (text.toUpperCase() === 'DONE') {
-      const fullContent = session.fileChunks.join('');
+      // FIX #2: chunks को '\n' से जोड़ो वरना lines आपस में चिपक जाती हैं
+      const fullContent = session.fileChunks.join('\n');
       const fname = session.pendingFilename;
       if (!fullContent) return ctx.reply('❌ No content!');
       session.files[fname] = fullContent;
@@ -369,9 +376,10 @@ bot.on('text', async (ctx) => {
       await showMainMenu(ctx, session);
       return;
     }
-    session.fileChunks.push(text);
+    // raw (untrimmed) text push करो ताकि indentation सुरक्षित रहे
+    session.fileChunks.push(rawText);
     const total = session.fileChunks.reduce((a, c) => a + c.length, 0);
-    ctx.reply(`📥 Part received (${text.length} chars). Total: ${total}. Send more or \`DONE\`.`);
+    ctx.reply(`📥 Part received (${rawText.length} chars). Total: ${total}. Send more or \`DONE\`.`);
   }
   else if (session.stage === 'waiting_delete') {
     if (session.files[text]) {
@@ -398,6 +406,14 @@ bot.on('text', async (ctx) => {
   else {
     ctx.reply('Please use the menu buttons or /deploy.');
   }
+});
+
+// ------------------------------------------------------------
+// 🛡️ GLOBAL ERROR HANDLER (नया — crash से बचाने के लिए)
+// ------------------------------------------------------------
+bot.catch((err, ctx) => {
+  console.error(`❌ Unhandled error for update ${ctx?.update?.update_id}:`, err);
+  try { ctx.reply('⚠️ कुछ गलत हो गया, कृपया दोबारा कोशिश करें।'); } catch (e) {}
 });
 
 // ------------------------------------------------------------
