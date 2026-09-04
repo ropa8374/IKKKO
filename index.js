@@ -4,7 +4,7 @@
 const MASTER_BOT_TOKEN = '8625601415:AAGIOdTkHOznIz_VlnehzsgvZpxXJG37O0Y';  // <-- @BotFather से लें
 
 // ------------------------------------------------------------
-// बाकी कोड – पूरी तरह Non-Blocking Deploy के साथ
+// बाकी कोड – STABLE: STDIN बंद, Timeout के साथ
 // ------------------------------------------------------------
 const { Telegraf, Markup } = require('telegraf');
 const fs = require('fs/promises');
@@ -21,24 +21,41 @@ const bot = new Telegraf(MASTER_BOT_TOKEN);
 const sessions = new Map();
 
 // ------------------------------------------------------------
-// 🛠️ Railway CLI – सुरक्षित (shell: false)
+// 🛠️ Railway CLI – STDIN बंद, 120 सेकंड Timeout
 // ------------------------------------------------------------
 const runRailwayCmd = (token, args, cwd) => {
   return new Promise((resolve, reject) => {
     const child = spawn('npx', ['railway', ...args], {
       cwd,
       env: { ...process.env, RAILWAY_TOKEN: token },
+      stdio: ['ignore', 'pipe', 'pipe'], // 🔥 STDIN बंद – कोई इंतज़ार नहीं
     });
 
     let stdout = '', stderr = '';
+
     child.stdout.on('data', (data) => { stdout += data.toString(); });
     child.stderr.on('data', (data) => { stderr += data.toString(); });
 
+    // 🔥 120 सेकंड Timeout – अगर CLI फँसी तो Fail
+    const timeout = setTimeout(() => {
+      child.kill();
+      reject(new Error(`Command timed out after 120s: railway ${args.join(' ')}`));
+    }, 120000);
+
     child.on('close', (code) => {
-      if (code !== 0) return reject(new Error(stderr || stdout || `Code ${code}`));
+      clearTimeout(timeout);
+      if (code !== 0) {
+        // अगर stderr खाली है, तो stdout में error हो सकता है
+        const errorMsg = stderr || stdout || `Command failed with code ${code}`;
+        return reject(new Error(errorMsg));
+      }
       resolve(stdout);
     });
-    child.on('error', (err) => reject(err));
+
+    child.on('error', (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
   });
 };
 
@@ -125,19 +142,17 @@ const showMainMenu = async (ctx, session, projectsList = null) => {
 };
 
 // ------------------------------------------------------------
-// 🚀 NON-BLOCKING DEPLOYMENT (Background में चलेगा)
+// 🚀 NON-BLOCKING DEPLOYMENT (Error अब दिखेगी)
 // ------------------------------------------------------------
 const executeDeployment = (ctx, session) => {
   const userId = ctx.from.id;
   const tempDir = path.join(os.tmpdir(), `rd_${userId}_${Date.now()}`);
 
-  // तुरंत Reply – Bot को Timeout न होने दें
-  ctx.reply('⏳ *Deployment started!* It will take 1-2 minutes. Check Railway Dashboard for progress.', { parse_mode: 'Markdown' });
+  ctx.reply('⏳ *Deployment started!* It will take 1-2 minutes. Check progress here (I will notify if it fails).', { parse_mode: 'Markdown' });
 
-  // सारा काम Background में करें – बिना await के
   (async () => {
     try {
-      // Temp folder + Files
+      // 1. Temp folder बनाओ
       await fs.mkdir(tempDir, { recursive: true });
       for (const [name, content] of Object.entries(session.files)) {
         await fs.writeFile(path.join(tempDir, name), content);
@@ -146,35 +161,37 @@ const executeDeployment = (ctx, session) => {
       const projectName = `tb_${userId}_${Date.now()}`;
       const projectId = session.deployTargetProject;
 
+      // 2. Project init / link
       if (projectId) {
         await runRailwayCmd(session.railwayToken, ['link', projectId], tempDir);
       } else {
         await runRailwayCmd(session.railwayToken, ['init', '-n', projectName], tempDir);
       }
 
-      // 🔥 --detach – background में deploy
+      // 3. Deploy
       await runRailwayCmd(session.railwayToken, ['up', '--detach'], tempDir);
 
-      // Cleanup
+      // 4. Cleanup
       await fs.rm(tempDir, { recursive: true, force: true });
 
-      // Success – User को बाद में सूचित करें (वैकल्पिक)
       await ctx.reply('✅ *Deployment triggered successfully!* Your bot will be live shortly on Railway.', { parse_mode: 'Markdown' });
 
     } catch (err) {
       try { await fs.rm(tempDir, { recursive: true, force: true }); } catch (e) {}
-      await ctx.reply(`❌ *Deployment Failed!*\n\`\`\`${err.message.slice(0, 400)}\`\`\``, { parse_mode: 'Markdown' });
+      // 🔥 असली Error अब यहाँ दिखेगा
+      await ctx.reply(
+        `❌ *Deployment Failed!*\n\nReason:\n\`\`\`${err.message.slice(0, 500)}\`\`\`\n\nPlease check your code files or token permissions.`,
+        { parse_mode: 'Markdown' }
+      );
     }
-  })(); // IIFE – तुरंत चलेगा, पर await नहीं किया
+  })();
 
-  // Session reset – लेकिन Deploy होने तक फाइलें रहेंगी (अगर चाहें तो रख सकते हैं)
-  // हम session.stage को idle कर देंगे, पर files नहीं हटाएँगे
   session.stage = 'idle';
   session.deployTargetProject = null;
 };
 
 // ------------------------------------------------------------
-// 🤖 COMMANDS
+// 🤖 COMMANDS & BUTTONS (बिल्कुल वही, सिर्फ कॉपी करें)
 // ------------------------------------------------------------
 bot.start((ctx) => {
   const session = getSession(ctx.from.id);
@@ -202,10 +219,7 @@ bot.command('status', (ctx) => {
   const session = getSession(ctx.from.id);
   const fileCount = Object.keys(session.files).length;
   ctx.reply(
-    `📊 *Status*\n` +
-    `Stage: ${session.stage}\n` +
-    `Token: ${session.railwayToken ? '✅' : '❌'}\n` +
-    `Files: ${fileCount}`,
+    `📊 *Status*\nStage: ${session.stage}\nToken: ${session.railwayToken ? '✅' : '❌'}\nFiles: ${fileCount}`,
     { parse_mode: 'Markdown' }
   );
 });
@@ -227,17 +241,13 @@ bot.command('cancel', (ctx) => {
   ctx.reply('✅ Cancelled.');
 });
 
-// ------------------------------------------------------------
-// 🎯 INLINE BUTTONS
-// ------------------------------------------------------------
+// ------------------- INLINE BUTTONS -------------------
 bot.action('add_file', (ctx) => {
   const session = getSession(ctx.from.id);
   session.stage = 'waiting_filename';
   session.fileChunks = [];
   ctx.reply(
-    `✏️ Enter the *filename* (e.g., \`index.js\`, \`main.py\`).\n\n` +
-    `After this, paste your code in parts.\n` +
-    `When finished, type \`DONE\` (in capital letters).`,
+    `✏️ Enter the *filename* (e.g., \`index.js\`, \`main.py\`).\n\nAfter this, paste your code in parts.\nWhen finished, type \`DONE\`.`,
     { parse_mode: 'Markdown' }
   );
   ctx.answerCbQuery();
@@ -271,9 +281,7 @@ bot.action('deploy_new', async (ctx) => {
   session.deployTargetProject = null;
   session.stage = 'deploy_confirm';
   ctx.reply(
-    `⚠️ *Deploy to NEW Project*\n\n` +
-    `Files: ${Object.keys(session.files).join(', ')}\n\n` +
-    `Type *CONFIRM* to proceed, or /cancel to abort.`,
+    `⚠️ *Deploy to NEW Project*\n\nFiles: ${Object.keys(session.files).join(', ')}\n\nType *CONFIRM* to proceed.`,
     { parse_mode: 'Markdown' }
   );
   ctx.answerCbQuery();
@@ -293,10 +301,7 @@ bot.action('deploy_existing', async (ctx) => {
   }
 
   if (result.projects.length === 0) {
-    ctx.reply(
-      `📋 No existing projects found.\nPlease use *"Deploy to NEW Project"*.`,
-      { parse_mode: 'Markdown' }
-    );
+    ctx.reply(`📋 No existing projects found.\nPlease use *"Deploy to NEW Project"*.`, { parse_mode: 'Markdown' });
     return ctx.answerCbQuery();
   }
 
@@ -310,12 +315,12 @@ bot.action('deploy_existing', async (ctx) => {
 
 bot.action('reset_session', (ctx) => {
   sessions.delete(ctx.from.id);
-  ctx.reply('✅ Session reset. Use /deploy to start fresh.');
+  ctx.reply('✅ Session reset.');
   ctx.answerCbQuery();
 });
 
 // ------------------------------------------------------------
-// 📝 TEXT HANDLER – Accumulator + DONE System
+// 📝 TEXT HANDLER
 // ------------------------------------------------------------
 bot.on('text', async (ctx) => {
   const userId = ctx.from.id;
@@ -323,7 +328,6 @@ bot.on('text', async (ctx) => {
   const text = ctx.message.text.trim();
   if (text.startsWith('/')) return;
 
-  // ---- waiting_token ----
   if (session.stage === 'waiting_token') {
     session.railwayToken = text;
     session.stage = 'verifying';
@@ -337,86 +341,53 @@ bot.on('text', async (ctx) => {
     session.stage = 'idle';
     await showMainMenu(ctx, session, result.projects);
   }
-
-  // ---- waiting_filename ----
   else if (session.stage === 'waiting_filename') {
     session.pendingFilename = text;
     session.fileChunks = [];
     session.stage = 'waiting_code';
-    ctx.reply(
-      `📄 Now send the *content* of \`${text}\`.\n\n` +
-      `Paste the code in parts (any size).\n` +
-      `When finished, type \`DONE\` (in capital letters).`,
-      { parse_mode: 'Markdown' }
-    );
+    ctx.reply(`📄 Now send content of \`${text}\`. Type \`DONE\` when finished.`, { parse_mode: 'Markdown' });
   }
-
-  // ---- waiting_code (Accumulator) ----
   else if (session.stage === 'waiting_code') {
     if (text.toUpperCase() === 'DONE') {
       const fullContent = session.fileChunks.join('');
       const fname = session.pendingFilename;
-      if (fullContent.length === 0) {
-        return ctx.reply('❌ No content received! Please paste code first.');
-      }
+      if (!fullContent) return ctx.reply('❌ No content!');
       session.files[fname] = fullContent;
       session.pendingFilename = null;
       session.fileChunks = [];
       session.stage = 'idle';
-      ctx.reply(`✅ File \`${fname}\` saved successfully! (${fullContent.length} characters)`, { parse_mode: 'Markdown' });
+      ctx.reply(`✅ File \`${fname}\` saved! (${fullContent.length} chars)`, { parse_mode: 'Markdown' });
       await showMainMenu(ctx, session);
       return;
     }
-
     session.fileChunks.push(text);
-    const totalSoFar = session.fileChunks.reduce((acc, chunk) => acc + chunk.length, 0);
-    await ctx.reply(
-      `📥 Received part (${text.length} chars). Total so far: ${totalSoFar} chars.\n` +
-      `Send more code, or type \`DONE\` when finished.`,
-      { parse_mode: 'Markdown' }
-    );
+    const total = session.fileChunks.reduce((a, c) => a + c.length, 0);
+    ctx.reply(`📥 Part received (${text.length} chars). Total: ${total}. Send more or \`DONE\`.`);
   }
-
-  // ---- waiting_delete ----
   else if (session.stage === 'waiting_delete') {
     if (session.files[text]) {
       delete session.files[text];
       ctx.reply(`✅ Deleted \`${text}\``, { parse_mode: 'Markdown' });
-    } else {
-      ctx.reply(`❌ File \`${text}\` not found.`);
-    }
+    } else ctx.reply(`❌ Not found.`);
     session.stage = 'idle';
     await showMainMenu(ctx, session);
   }
-
-  // ---- waiting_project_selection ----
   else if (session.stage === 'waiting_project_selection') {
     session.deployTargetProject = text;
     session.stage = 'deploy_confirm';
-    ctx.reply(
-      `⚠️ *Confirm Deploy to EXISTING Project*\n\n` +
-      `Target: \`${text}\`\n` +
-      `Files: ${Object.keys(session.files).join(', ')}\n\n` +
-      `Type *CONFIRM* to proceed, or /cancel to abort.`,
-      { parse_mode: 'Markdown' }
-    );
+    ctx.reply(`⚠️ Confirm deploy to \`${text}\`? Type CONFIRM.`, { parse_mode: 'Markdown' });
   }
-
-  // ---- deploy_confirm ----
   else if (session.stage === 'deploy_confirm') {
     if (text.toUpperCase() === 'CONFIRM') {
-      // ⚡ Non-Blocking call
       executeDeployment(ctx, session);
     } else {
-      ctx.reply('❌ Deployment cancelled.');
+      ctx.reply('❌ Cancelled.');
       session.stage = 'idle';
       await showMainMenu(ctx, session);
     }
   }
-
-  // ---- idle ----
   else {
-    ctx.reply('Please use the menu buttons or /deploy to start.');
+    ctx.reply('Please use the menu buttons or /deploy.');
   }
 });
 
@@ -425,10 +396,8 @@ bot.on('text', async (ctx) => {
 // ------------------------------------------------------------
 bot.launch().then(() => {
   console.log(`🚀 Master Bot is running...`);
-  console.log(`📡 Username: @${bot.botInfo.username}`);
-}).catch(err => {
-  console.error('❌ Launch error:', err);
-});
+  console.log(`📡 @${bot.botInfo.username}`);
+}).catch(err => console.error('Launch error:', err));
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
