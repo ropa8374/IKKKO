@@ -4,7 +4,7 @@
 const MASTER_BOT_TOKEN = '8625601415:AAGIOdTkHOznIz_VlnehzsgvZpxXJG37O0Y';  // <-- @BotFather से लें
 
 // ------------------------------------------------------------
-// बाकी कोड – FIXED: अब @railway/cli use कर रहा है
+// बाकी कोड – FIXED: init + up for new project
 // ------------------------------------------------------------
 const { Telegraf, Markup } = require('telegraf');
 const fs = require('fs/promises');
@@ -21,11 +21,10 @@ const bot = new Telegraf(MASTER_BOT_TOKEN);
 const sessions = new Map();
 
 // ------------------------------------------------------------
-// 🛠️ FIXED: @railway/cli – हमेशा Latest Version
+// 🛠️ Railway CLI – @railway/cli, STDIN बंद, Timeout
 // ------------------------------------------------------------
 const runRailwayCmd = (token, args, cwd) => {
   return new Promise((resolve, reject) => {
-    // 🔥 अब 'railway' नहीं, बल्कि '@railway/cli' – यह Official है
     const child = spawn('npx', ['--yes', '@railway/cli', ...args], {
       cwd,
       env: { ...process.env, RAILWAY_TOKEN: token },
@@ -146,7 +145,7 @@ const showMainMenu = async (ctx, session, projectsList = null) => {
 };
 
 // ------------------------------------------------------------
-// 🚀 DEPLOYMENT
+// 🚀 FIXED DEPLOYMENT – अब init और up अलग-अलग
 // ------------------------------------------------------------
 const executeDeployment = (ctx, session) => {
   const userId = ctx.from.id;
@@ -174,9 +173,12 @@ const executeDeployment = (ctx, session) => {
       const projectId = session.deployTargetProject;
 
       if (projectId) {
+        // Existing Project: सीधे up --project
         await runRailwayCmd(session.railwayToken, ['up', '--project', projectId], tempDir);
       } else {
-        await runRailwayCmd(session.railwayToken, ['up', '-n', projectName], tempDir);
+        // 🔥 NEW Project: पहले init -n, फिर up
+        await runRailwayCmd(session.railwayToken, ['init', '-n', projectName], tempDir);
+        await runRailwayCmd(session.railwayToken, ['up'], tempDir);
       }
 
       await fs.rm(tempDir, { recursive: true, force: true });
