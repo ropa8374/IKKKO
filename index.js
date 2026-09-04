@@ -4,7 +4,7 @@
 const MASTER_BOT_TOKEN = '8625601415:AAGIOdTkHOznIz_VlnehzsgvZpxXJG37O0Y';  // <-- @BotFather से लें
 
 // ------------------------------------------------------------
-// बाकी कोड – अब package.json Check + Better Error Logging
+// बाकी कोड – FIXED: अब @railway/cli use कर रहा है
 // ------------------------------------------------------------
 const { Telegraf, Markup } = require('telegraf');
 const fs = require('fs/promises');
@@ -21,11 +21,12 @@ const bot = new Telegraf(MASTER_BOT_TOKEN);
 const sessions = new Map();
 
 // ------------------------------------------------------------
-// 🛠️ Railway CLI – STDIN बंद, 120s Timeout, --yes
+// 🛠️ FIXED: @railway/cli – हमेशा Latest Version
 // ------------------------------------------------------------
 const runRailwayCmd = (token, args, cwd) => {
   return new Promise((resolve, reject) => {
-    const child = spawn('npx', ['--yes', 'railway', ...args], {
+    // 🔥 अब 'railway' नहीं, बल्कि '@railway/cli' – यह Official है
+    const child = spawn('npx', ['--yes', '@railway/cli', ...args], {
       cwd,
       env: { ...process.env, RAILWAY_TOKEN: token },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -38,13 +39,12 @@ const runRailwayCmd = (token, args, cwd) => {
 
     const timeout = setTimeout(() => {
       child.kill();
-      reject(new Error(`⏱️ Command timed out after 120s: railway ${args.join(' ')}`));
+      reject(new Error(`⏱️ Command timed out after 120s: @railway/cli ${args.join(' ')}`));
     }, 120000);
 
     child.on('close', (code) => {
       clearTimeout(timeout);
       if (code !== 0) {
-        // 🔥 अब stdout और stderr दोनों भेजो
         const fullOutput = (stdout + '\n' + stderr).trim();
         const errorMsg = fullOutput || `Command failed with code ${code}`;
         return reject(new Error(errorMsg));
@@ -126,7 +126,6 @@ const showMainMenu = async (ctx, session, projectsList = null) => {
   const fileKeys = Object.keys(session.files);
   msg += `\n📁 *Your Files:* ${fileKeys.length ? fileKeys.join(', ') : '(none)'}`;
 
-  // 🔥 Important: पक्का करें कि package.json हो
   if (!session.files['package.json'] && Object.keys(session.files).length > 0) {
     msg += `\n\n⚠️ *Missing package.json!* Railway needs it to deploy Node.js apps.`;
   }
@@ -147,13 +146,12 @@ const showMainMenu = async (ctx, session, projectsList = null) => {
 };
 
 // ------------------------------------------------------------
-// 🚀 DEPLOYMENT – अब package.json की जाँच
+// 🚀 DEPLOYMENT
 // ------------------------------------------------------------
 const executeDeployment = (ctx, session) => {
   const userId = ctx.from.id;
   const tempDir = path.join(os.tmpdir(), `rd_${userId}_${Date.now()}`);
 
-  // 🔥 Check: क्या package.json मौजूद है?
   if (!session.files['package.json']) {
     return ctx.reply(
       '❌ *Missing `package.json`!*\n\n' +
