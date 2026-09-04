@@ -1,10 +1,10 @@
 // ------------------------------------------------------------
-// 🔑 आपका Master Bot Token – यहाँ डालें
+// 🔑 आपका Master Bot Token – यहाँ अपना नया Token डालें
 // ------------------------------------------------------------
 const MASTER_BOT_TOKEN = '8625601415:AAGIOdTkHOznIz_VlnehzsgvZpxXJG37O0Y';  // <-- @BotFather से लें
 
 // ------------------------------------------------------------
-// बाकी कोड – पूरी तरह से Text Accumulator + DONE System
+// बाकी कोड – पूरी तरह Non-Blocking Deploy के साथ
 // ------------------------------------------------------------
 const { Telegraf, Markup } = require('telegraf');
 const fs = require('fs/promises');
@@ -21,7 +21,7 @@ const bot = new Telegraf(MASTER_BOT_TOKEN);
 const sessions = new Map();
 
 // ------------------------------------------------------------
-// 🛠️ Railway CLI – सुरक्षित (shell: false, --detach के साथ)
+// 🛠️ Railway CLI – सुरक्षित (shell: false)
 // ------------------------------------------------------------
 const runRailwayCmd = (token, args, cwd) => {
   return new Promise((resolve, reject) => {
@@ -35,7 +35,7 @@ const runRailwayCmd = (token, args, cwd) => {
     child.stderr.on('data', (data) => { stderr += data.toString(); });
 
     child.on('close', (code) => {
-      if (code !== 0) return reject(new Error(stderr || stdout || `Command failed with code ${code}`));
+      if (code !== 0) return reject(new Error(stderr || stdout || `Code ${code}`));
       resolve(stdout);
     });
     child.on('error', (err) => reject(err));
@@ -43,7 +43,7 @@ const runRailwayCmd = (token, args, cwd) => {
 };
 
 // ------------------------------------------------------------
-// 🌐 API से Projects List (बिना CLI के)
+// 🌐 API से Projects List
 // ------------------------------------------------------------
 const verifyAndListProjects = async (token) => {
   try {
@@ -57,16 +57,13 @@ const verifyAndListProjects = async (token) => {
         query: `query { projects { edges { node { id name } } } }`
       })
     });
-
     if (!res.ok) return { success: false, error: `HTTP ${res.status}` };
     const data = await res.json();
     if (data.errors) return { success: false, error: data.errors[0].message };
-
     const projects = data.data?.projects?.edges?.map(e => ({
       id: e.node.id,
       name: e.node.name
     })) || [];
-
     return { success: true, projects };
   } catch (err) {
     return { success: false, error: err.message };
@@ -79,12 +76,12 @@ const verifyAndListProjects = async (token) => {
 const getSession = (userId) => {
   if (!sessions.has(userId)) {
     sessions.set(userId, {
-      stage: 'idle',             // idle | waiting_token | waiting_filename | waiting_code | waiting_delete | waiting_project_selection | deploy_confirm
+      stage: 'idle',
       railwayToken: null,
-      files: {},                 // filename → content (पूरी file)
+      files: {},
       pendingFilename: null,
       deployTargetProject: null,
-      fileChunks: [],            // Code के टुकड़े यहाँ जमा होंगे
+      fileChunks: [],
     });
   }
   return sessions.get(userId);
@@ -96,11 +93,8 @@ const getSession = (userId) => {
 const showMainMenu = async (ctx, session, projectsList = null) => {
   if (!projectsList && session.railwayToken) {
     const result = await verifyAndListProjects(session.railwayToken);
-    if (result.success) {
-      projectsList = result.projects;
-    } else {
-      return ctx.reply(`⚠️ API Error: ${result.error}`, { parse_mode: 'Markdown' });
-    }
+    if (result.success) projectsList = result.projects;
+    else return ctx.reply(`⚠️ API Error: ${result.error}`, { parse_mode: 'Markdown' });
   }
 
   const projectCount = projectsList?.length || 0;
@@ -131,45 +125,50 @@ const showMainMenu = async (ctx, session, projectsList = null) => {
 };
 
 // ------------------------------------------------------------
-// 🚀 Execute Deployment – No Timeout (--detach)
+// 🚀 NON-BLOCKING DEPLOYMENT (Background में चलेगा)
 // ------------------------------------------------------------
-const executeDeployment = async (ctx, session) => {
+const executeDeployment = (ctx, session) => {
   const userId = ctx.from.id;
   const tempDir = path.join(os.tmpdir(), `rd_${userId}_${Date.now()}`);
 
   // तुरंत Reply – Bot को Timeout न होने दें
-  ctx.reply('⏳ *Deployment started!*\nCheck Railway Dashboard for progress.', { parse_mode: 'Markdown' });
+  ctx.reply('⏳ *Deployment started!* It will take 1-2 minutes. Check Railway Dashboard for progress.', { parse_mode: 'Markdown' });
 
-  try {
-    // Temp folder + Files
-    await fs.mkdir(tempDir, { recursive: true });
-    for (const [name, content] of Object.entries(session.files)) {
-      await fs.writeFile(path.join(tempDir, name), content);
+  // सारा काम Background में करें – बिना await के
+  (async () => {
+    try {
+      // Temp folder + Files
+      await fs.mkdir(tempDir, { recursive: true });
+      for (const [name, content] of Object.entries(session.files)) {
+        await fs.writeFile(path.join(tempDir, name), content);
+      }
+
+      const projectName = `tb_${userId}_${Date.now()}`;
+      const projectId = session.deployTargetProject;
+
+      if (projectId) {
+        await runRailwayCmd(session.railwayToken, ['link', projectId], tempDir);
+      } else {
+        await runRailwayCmd(session.railwayToken, ['init', '-n', projectName], tempDir);
+      }
+
+      // 🔥 --detach – background में deploy
+      await runRailwayCmd(session.railwayToken, ['up', '--detach'], tempDir);
+
+      // Cleanup
+      await fs.rm(tempDir, { recursive: true, force: true });
+
+      // Success – User को बाद में सूचित करें (वैकल्पिक)
+      await ctx.reply('✅ *Deployment triggered successfully!* Your bot will be live shortly on Railway.', { parse_mode: 'Markdown' });
+
+    } catch (err) {
+      try { await fs.rm(tempDir, { recursive: true, force: true }); } catch (e) {}
+      await ctx.reply(`❌ *Deployment Failed!*\n\`\`\`${err.message.slice(0, 400)}\`\`\``, { parse_mode: 'Markdown' });
     }
+  })(); // IIFE – तुरंत चलेगा, पर await नहीं किया
 
-    const projectName = `tb_${userId}_${Date.now()}`;
-    const projectId = session.deployTargetProject;
-
-    if (projectId) {
-      await runRailwayCmd(session.railwayToken, ['link', projectId], tempDir);
-    } else {
-      await runRailwayCmd(session.railwayToken, ['init', '-n', projectName], tempDir);
-    }
-
-    // 🔥 --detach – background में deploy होगा
-    await runRailwayCmd(session.railwayToken, ['up', '--detach'], tempDir);
-
-    // Cleanup
-    await fs.rm(tempDir, { recursive: true, force: true });
-
-    // Success – अब User खुद Dashboard पर URL देखेगा
-    ctx.reply('✅ *Deployment triggered successfully!*\nYour bot will be live shortly on Railway.', { parse_mode: 'Markdown' });
-
-  } catch (err) {
-    try { await fs.rm(tempDir, { recursive: true, force: true }); } catch (e) {}
-    ctx.reply(`❌ *Deployment Failed!*\n\`\`\`${err.message.slice(0, 400)}\`\`\``, { parse_mode: 'Markdown' });
-  }
-
+  // Session reset – लेकिन Deploy होने तक फाइलें रहेंगी (अगर चाहें तो रख सकते हैं)
+  // हम session.stage को idle कर देंगे, पर files नहीं हटाएँगे
   session.stage = 'idle';
   session.deployTargetProject = null;
 };
@@ -234,7 +233,7 @@ bot.command('cancel', (ctx) => {
 bot.action('add_file', (ctx) => {
   const session = getSession(ctx.from.id);
   session.stage = 'waiting_filename';
-  session.fileChunks = []; // पुराने chunks खाली करें
+  session.fileChunks = [];
   ctx.reply(
     `✏️ Enter the *filename* (e.g., \`index.js\`, \`main.py\`).\n\n` +
     `After this, paste your code in parts.\n` +
@@ -316,7 +315,7 @@ bot.action('reset_session', (ctx) => {
 });
 
 // ------------------------------------------------------------
-// 📝 TEXT HANDLER – केवल Accumulator + DONE System
+// 📝 TEXT HANDLER – Accumulator + DONE System
 // ------------------------------------------------------------
 bot.on('text', async (ctx) => {
   const userId = ctx.from.id;
@@ -324,7 +323,7 @@ bot.on('text', async (ctx) => {
   const text = ctx.message.text.trim();
   if (text.startsWith('/')) return;
 
-  // ---- STATE: waiting_token ----
+  // ---- waiting_token ----
   if (session.stage === 'waiting_token') {
     session.railwayToken = text;
     session.stage = 'verifying';
@@ -339,49 +338,38 @@ bot.on('text', async (ctx) => {
     await showMainMenu(ctx, session, result.projects);
   }
 
-  // ---- STATE: waiting_filename ----
+  // ---- waiting_filename ----
   else if (session.stage === 'waiting_filename') {
     session.pendingFilename = text;
-    session.fileChunks = []; // नए file के लिए chunks empty
+    session.fileChunks = [];
     session.stage = 'waiting_code';
     ctx.reply(
       `📄 Now send the *content* of \`${text}\`.\n\n` +
       `Paste the code in parts (any size).\n` +
-      `When you have pasted all parts, type \`DONE\` (in capital letters) to finish.`,
+      `When finished, type \`DONE\` (in capital letters).`,
       { parse_mode: 'Markdown' }
     );
   }
 
-  // ---- STATE: waiting_code (Core Accumulator) ----
+  // ---- waiting_code (Accumulator) ----
   else if (session.stage === 'waiting_code') {
-    // अगर user ने DONE लिखा है → file complete करें
     if (text.toUpperCase() === 'DONE') {
       const fullContent = session.fileChunks.join('');
       const fname = session.pendingFilename;
-
       if (fullContent.length === 0) {
         return ctx.reply('❌ No content received! Please paste code first.');
       }
-
-      // File को save करें
       session.files[fname] = fullContent;
       session.pendingFilename = null;
       session.fileChunks = [];
       session.stage = 'idle';
-
-      ctx.reply(
-        `✅ File \`${fname}\` saved successfully! (${fullContent.length} characters)`,
-        { parse_mode: 'Markdown' }
-      );
+      ctx.reply(`✅ File \`${fname}\` saved successfully! (${fullContent.length} characters)`, { parse_mode: 'Markdown' });
       await showMainMenu(ctx, session);
       return;
     }
 
-    // वरना, इस part को जमा करें
     session.fileChunks.push(text);
     const totalSoFar = session.fileChunks.reduce((acc, chunk) => acc + chunk.length, 0);
-
-    // User को फीडबैक दें
     await ctx.reply(
       `📥 Received part (${text.length} chars). Total so far: ${totalSoFar} chars.\n` +
       `Send more code, or type \`DONE\` when finished.`,
@@ -389,7 +377,7 @@ bot.on('text', async (ctx) => {
     );
   }
 
-  // ---- STATE: waiting_delete ----
+  // ---- waiting_delete ----
   else if (session.stage === 'waiting_delete') {
     if (session.files[text]) {
       delete session.files[text];
@@ -401,7 +389,7 @@ bot.on('text', async (ctx) => {
     await showMainMenu(ctx, session);
   }
 
-  // ---- STATE: waiting_project_selection ----
+  // ---- waiting_project_selection ----
   else if (session.stage === 'waiting_project_selection') {
     session.deployTargetProject = text;
     session.stage = 'deploy_confirm';
@@ -414,10 +402,11 @@ bot.on('text', async (ctx) => {
     );
   }
 
-  // ---- STATE: deploy_confirm ----
+  // ---- deploy_confirm ----
   else if (session.stage === 'deploy_confirm') {
     if (text.toUpperCase() === 'CONFIRM') {
-      await executeDeployment(ctx, session);
+      // ⚡ Non-Blocking call
+      executeDeployment(ctx, session);
     } else {
       ctx.reply('❌ Deployment cancelled.');
       session.stage = 'idle';
@@ -425,14 +414,14 @@ bot.on('text', async (ctx) => {
     }
   }
 
-  // ---- IDLE (कुछ नहीं) ----
+  // ---- idle ----
   else {
     ctx.reply('Please use the menu buttons or /deploy to start.');
   }
 });
 
 // ------------------------------------------------------------
-// 🚀 START THE BOT
+// 🚀 START
 // ------------------------------------------------------------
 bot.launch().then(() => {
   console.log(`🚀 Master Bot is running...`);
