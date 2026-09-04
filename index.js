@@ -20,17 +20,20 @@ if (!MASTER_BOT_TOKEN || MASTER_BOT_TOKEN === 'YOUR_BOT_FATHER_TOKEN_HERE') {
 const bot = new Telegraf(MASTER_BOT_TOKEN);
 const sessions = new Map();
 
-// ------------------------------------------------------------
-// Railway CLI को npx के ज़रिए call करें
-// ------------------------------------------------------------
+// ----------------------------------------------
+// FIXED: Railway CLI को Token ENV Variable से दो
+// ----------------------------------------------
 const runRailwayCmd = (token, args, cwd) => {
   return new Promise((resolve, reject) => {
     const cmd = 'npx';
-    const cmdArgs = ['railway', '--token', token, ...args];
+    const cmdArgs = ['railway', ...args];
     
-    console.log(`[CMD] npx railway ${args.join(' ')}`); // token hidden
+    // Environment में RAILWAY_TOKEN सेट करो
+    const env = { ...process.env, RAILWAY_TOKEN: token };
 
-    const process = spawn(cmd, cmdArgs, { cwd, shell: true });
+    console.log(`[CMD] npx railway ${args.join(' ')} (Token via ENV)`);
+
+    const process = spawn(cmd, cmdArgs, { cwd, shell: true, env });
 
     let stdout = '', stderr = '';
     process.stdout.on('data', (data) => { stdout += data.toString(); });
@@ -44,34 +47,6 @@ const runRailwayCmd = (token, args, cwd) => {
     });
     process.on('error', (err) => reject(err));
   });
-};
-
-// ------------------------------------------------------------
-// बाकी सारे helper, session management, और bot handlers
-// (पूरी तरह वही जो पहले थे – सिर्फ .env हटाया)
-// ------------------------------------------------------------
-// ... (यहाँ सभी function बिल्कुल वैसे ही रखें जैसे पिछले code में थे,
-//     लेकिन require('dotenv').config() हटा दें)
-// 
-// नीचे सिर्फ उदाहरण के तौर पर मुख्य हिस्से दिखा रहा हूँ,
-// पूरा code आपको अलग से भेजूंगा (चूँकि लंबा है, लेकिन आपको पूरा चाहिए)
-// 
-
-// ----------------------------------------------
-// SESSION MANAGEMENT
-// ----------------------------------------------
-const getSession = (userId) => {
-  if (!sessions.has(userId)) {
-    sessions.set(userId, {
-      stage: 'idle',
-      railwayToken: null,
-      files: {},
-      pendingFilename: null,
-      deployTargetProject: null,
-      tempDir: null,
-    });
-  }
-  return sessions.get(userId);
 };
 
 // ----------------------------------------------
@@ -92,6 +67,23 @@ const verifyAndListProjects = async (token) => {
   } catch (error) {
     return { success: false, error: error.message };
   }
+};
+
+// ----------------------------------------------
+// SESSION MANAGEMENT
+// ----------------------------------------------
+const getSession = (userId) => {
+  if (!sessions.has(userId)) {
+    sessions.set(userId, {
+      stage: 'idle',
+      railwayToken: null,
+      files: {},
+      pendingFilename: null,
+      deployTargetProject: null,
+      tempDir: null,
+    });
+  }
+  return sessions.get(userId);
 };
 
 // ----------------------------------------------
@@ -133,7 +125,7 @@ const showMainMenu = async (ctx, session, projectsList = null) => {
 };
 
 // ----------------------------------------------
-// BOT HANDLERS (संक्षिप्त)
+// BOT HANDLERS
 // ----------------------------------------------
 bot.start((ctx) => {
   const session = getSession(ctx.from.id);
@@ -160,7 +152,7 @@ bot.command('deploy', async (ctx) => {
   await showMainMenu(ctx, session);
 });
 
-// Text handler (simplified)
+// Text handler
 bot.on('text', async (ctx) => {
   const userId = ctx.from.id;
   const session = getSession(userId);
@@ -219,7 +211,7 @@ bot.on('text', async (ctx) => {
   }
 });
 
-// Button actions (same as previous, here just placeholder)
+// Button actions
 bot.action('add_file', (ctx) => {
   const session = getSession(ctx.from.id);
   session.stage = 'waiting_filename';
