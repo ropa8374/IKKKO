@@ -1,0 +1,13 @@
+{
+  "name": "kiozhxd",
+  "version": "1.0.0",
+  "description": "skujdha",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@railway/cli": "^3.5.0",
+    "telegraf": "^4.12.2"
+  }
+}
