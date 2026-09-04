@@ -1,10 +1,10 @@
 // ------------------------------------------------------------
 // 🔑 आपका Master Bot Token – यहाँ अपना नया Token डालें
 // ------------------------------------------------------------
-const MASTER_BOT_TOKEN = '8625601415:AAGIOdTkHOznIz_VlnehzsgvZpxXJG37O0Y';  // <-- @BotFather से लें
+const MASTER_BOT_TOKEN = '8464608757:AAGbBQl5BLNP0mGNB3CdGkTxpo2di5X5xl0';  // <-- @BotFather से लें
 
 // ------------------------------------------------------------
-// बाकी कोड – STABLE: STDIN बंद, Timeout के साथ
+// बाकी कोड – FIX: npx --yes के साथ
 // ------------------------------------------------------------
 const { Telegraf, Markup } = require('telegraf');
 const fs = require('fs/promises');
@@ -21,14 +21,15 @@ const bot = new Telegraf(MASTER_BOT_TOKEN);
 const sessions = new Map();
 
 // ------------------------------------------------------------
-// 🛠️ Railway CLI – STDIN बंद, 120 सेकंड Timeout
+// 🛠️ FIXED: npx --yes (Auto-Install without prompt)
 // ------------------------------------------------------------
 const runRailwayCmd = (token, args, cwd) => {
   return new Promise((resolve, reject) => {
-    const child = spawn('npx', ['railway', ...args], {
+    // 🔥 --yes डाला – अब Prompt नहीं आएगा
+    const child = spawn('npx', ['--yes', 'railway', ...args], {
       cwd,
       env: { ...process.env, RAILWAY_TOKEN: token },
-      stdio: ['ignore', 'pipe', 'pipe'], // 🔥 STDIN बंद – कोई इंतज़ार नहीं
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
 
     let stdout = '', stderr = '';
@@ -36,7 +37,7 @@ const runRailwayCmd = (token, args, cwd) => {
     child.stdout.on('data', (data) => { stdout += data.toString(); });
     child.stderr.on('data', (data) => { stderr += data.toString(); });
 
-    // 🔥 120 सेकंड Timeout – अगर CLI फँसी तो Fail
+    // Timeout 120s
     const timeout = setTimeout(() => {
       child.kill();
       reject(new Error(`Command timed out after 120s: railway ${args.join(' ')}`));
@@ -45,7 +46,6 @@ const runRailwayCmd = (token, args, cwd) => {
     child.on('close', (code) => {
       clearTimeout(timeout);
       if (code !== 0) {
-        // अगर stderr खाली है, तो stdout में error हो सकता है
         const errorMsg = stderr || stdout || `Command failed with code ${code}`;
         return reject(new Error(errorMsg));
       }
@@ -142,7 +142,7 @@ const showMainMenu = async (ctx, session, projectsList = null) => {
 };
 
 // ------------------------------------------------------------
-// 🚀 NON-BLOCKING DEPLOYMENT (Error अब दिखेगी)
+// 🚀 NON-BLOCKING DEPLOYMENT
 // ------------------------------------------------------------
 const executeDeployment = (ctx, session) => {
   const userId = ctx.from.id;
@@ -152,7 +152,6 @@ const executeDeployment = (ctx, session) => {
 
   (async () => {
     try {
-      // 1. Temp folder बनाओ
       await fs.mkdir(tempDir, { recursive: true });
       for (const [name, content] of Object.entries(session.files)) {
         await fs.writeFile(path.join(tempDir, name), content);
@@ -161,24 +160,20 @@ const executeDeployment = (ctx, session) => {
       const projectName = `tb_${userId}_${Date.now()}`;
       const projectId = session.deployTargetProject;
 
-      // 2. Project init / link
       if (projectId) {
         await runRailwayCmd(session.railwayToken, ['link', projectId], tempDir);
       } else {
         await runRailwayCmd(session.railwayToken, ['init', '-n', projectName], tempDir);
       }
 
-      // 3. Deploy
       await runRailwayCmd(session.railwayToken, ['up', '--detach'], tempDir);
 
-      // 4. Cleanup
       await fs.rm(tempDir, { recursive: true, force: true });
 
       await ctx.reply('✅ *Deployment triggered successfully!* Your bot will be live shortly on Railway.', { parse_mode: 'Markdown' });
 
     } catch (err) {
       try { await fs.rm(tempDir, { recursive: true, force: true }); } catch (e) {}
-      // 🔥 असली Error अब यहाँ दिखेगा
       await ctx.reply(
         `❌ *Deployment Failed!*\n\nReason:\n\`\`\`${err.message.slice(0, 500)}\`\`\`\n\nPlease check your code files or token permissions.`,
         { parse_mode: 'Markdown' }
@@ -191,7 +186,7 @@ const executeDeployment = (ctx, session) => {
 };
 
 // ------------------------------------------------------------
-// 🤖 COMMANDS & BUTTONS (बिल्कुल वही, सिर्फ कॉपी करें)
+// 🤖 COMMANDS & BUTTONS (बिल्कुल वही)
 // ------------------------------------------------------------
 bot.start((ctx) => {
   const session = getSession(ctx.from.id);
