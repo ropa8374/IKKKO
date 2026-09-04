@@ -22,23 +22,17 @@ const bot = new Telegraf(MASTER_BOT_TOKEN);
 const sessions = new Map();  // Telegram UserID → session data
 
 // ------------------------------------------------------------
-// 🛠️ Railway CLI को ENV variable के साथ चलाएँ (--token नहीं)
+// 🛠️ Railway CLI को ENV variable के साथ चलाएँ
 // ------------------------------------------------------------
 const runRailwayCmd = (token, args, cwd) => {
   return new Promise((resolve, reject) => {
     const cmd = 'npx';
     const cmdArgs = ['railway', ...args];
-    
-    // ENV में RAILWAY_TOKEN सेट करें
     const env = { ...process.env, RAILWAY_TOKEN: token };
 
-    console.log(`[CMD] npx railway ${args.join(' ')} (Token via ENV)`);
+    console.log(`[CMD] npx railway ${args.join(' ')}`);
 
-    const child = spawn(cmd, cmdArgs, {
-      cwd,
-      shell: true,
-      env,
-    });
+    const child = spawn(cmd, cmdArgs, { cwd, shell: true, env });
 
     let stdout = '', stderr = '';
 
@@ -46,8 +40,10 @@ const runRailwayCmd = (token, args, cwd) => {
     child.stderr.on('data', (data) => { stderr += data.toString(); });
 
     child.on('close', (code) => {
+      // अगर कोड 0 है तो success, वरना error
       if (code !== 0) {
-        return reject(new Error(stderr || `Command failed with code ${code}`));
+        // stderr में npm warnings भी आ सकती हैं, लेकिन असली error वही है
+        return reject(new Error(stderr || stdout || `Command failed with code ${code}`));
       }
       resolve(stdout);
     });
@@ -57,19 +53,32 @@ const runRailwayCmd = (token, args, cwd) => {
 };
 
 // ------------------------------------------------------------
-// 📋 Token Verify + Project List
+// 🌐 नया: GraphQL API से Projects की List लें (CLI नहीं)
 // ------------------------------------------------------------
 const verifyAndListProjects = async (token) => {
   try {
-    const output = await runRailwayCmd(token, ['project', 'list']);
-    const projects = [];
-    const lines = output.split('\n');
-    for (const line of lines) {
-      const match = line.match(/ID:\s*([^\s|]+)\s*\|\s*Name:\s*(.+)/);
-      if (match) {
-        projects.push({ id: match[1].trim(), name: match[2].trim() });
-      }
+    const response = await fetch('https://backboard.railway.com/graphql/v2', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({
+        query: `query { projects { edges { node { id name } } } }`
+      })
+    });
+
+    const data = await response.json();
+
+    if (data.errors) {
+      return { success: false, error: data.errors[0].message };
     }
+
+    const projects = data.data.projects.edges.map(edge => ({
+      id: edge.node.id,
+      name: edge.node.name
+    }));
+
     return { success: true, projects };
   } catch (error) {
     return { success: false, error: error.message };
@@ -82,9 +91,9 @@ const verifyAndListProjects = async (token) => {
 const getSession = (userId) => {
   if (!sessions.has(userId)) {
     sessions.set(userId, {
-      stage: 'idle',               // idle | waiting_token | waiting_filename | waiting_code | waiting_delete | waiting_project_selection | deploy_confirm
+      stage: 'idle',
       railwayToken: null,
-      files: {},                   // filename → content
+      files: {},
       pendingFilename: null,
       deployTargetProject: null,
     });
@@ -101,7 +110,7 @@ const showMainMenu = async (ctx, session, projectsList = null) => {
     if (result.success) {
       projectsList = result.projects;
     } else {
-      return ctx.reply('⚠️ Could not fetch projects. Token might be expired. Use /reset and /deploy again.');
+      return ctx.reply(`⚠️ Could not fetch projects: ${result.error}\nToken might be expired. Use /reset and /deploy again.`);
     }
   }
 
@@ -139,7 +148,7 @@ const showMainMenu = async (ctx, session, projectsList = null) => {
 const executeDeployment = async (ctx, session) => {
   const userId = ctx.from.id;
   const tempDir = path.join(os.tmpdir(), `rd_${userId}_${Date.now()}`);
-  ctx.reply('⏳ Deploying...');
+  ctx.reply('⏳ Deploying... Please wait (this takes 1-2 minutes).');
 
   try {
     await fs.mkdir(tempDir, { recursive: true });
@@ -151,17 +160,13 @@ const executeDeployment = async (ctx, session) => {
     let projectId = session.deployTargetProject;
 
     if (projectId) {
-      // Link to existing project
       await runRailwayCmd(session.railwayToken, ['link', projectId], tempDir);
     } else {
-      // Create new project
       await runRailwayCmd(session.railwayToken, ['init', '-n', projectName], tempDir);
     }
 
-    // Deploy (--detach so it runs in background)
     await runRailwayCmd(session.railwayToken, ['up', '--detach'], tempDir);
 
-    // Cleanup
     await fs.rm(tempDir, { recursive: true, force: true });
 
     ctx.reply(
@@ -174,8 +179,6 @@ const executeDeployment = async (ctx, session) => {
 
     session.stage = 'idle';
     session.deployTargetProject = null;
-    // Optionally clear files to save memory:
-    // session.files = {};
 
   } catch (err) {
     try { await fs.rm(tempDir, { recursive: true, force: true }); } catch (e) {}
@@ -188,20 +191,17 @@ const executeDeployment = async (ctx, session) => {
 // 🤖 BOT COMMANDS & HANDLERS
 // ------------------------------------------------------------
 
-// Start
 bot.start((ctx) => {
   const session = getSession(ctx.from.id);
   session.stage = 'idle';
   ctx.reply('🤖 *Railway Master Bot*\n\nCommands: /deploy , /status , /reset', { parse_mode: 'Markdown' });
 });
 
-// Reset
 bot.command('reset', (ctx) => {
   sessions.delete(ctx.from.id);
   ctx.reply('✅ Session reset. Use /deploy to start fresh.');
 });
 
-// Status
 bot.command('status', (ctx) => {
   const session = getSession(ctx.from.id);
   const fileCount = Object.keys(session.files).length;
@@ -211,7 +211,6 @@ bot.command('status', (ctx) => {
   );
 });
 
-// Deploy
 bot.command('deploy', async (ctx) => {
   const session = getSession(ctx.from.id);
   if (!session.railwayToken) {
@@ -221,7 +220,6 @@ bot.command('deploy', async (ctx) => {
   await showMainMenu(ctx, session);
 });
 
-// Cancel
 bot.command('cancel', (ctx) => {
   const session = getSession(ctx.from.id);
   session.stage = 'idle';
@@ -265,7 +263,7 @@ bot.action('deploy_new', async (ctx) => {
     ctx.reply('❌ No files to deploy. Add files first!');
     return ctx.answerCbQuery();
   }
-  session.deployTargetProject = null;  // new project
+  session.deployTargetProject = null;
   session.stage = 'deploy_confirm';
   ctx.reply(
     `⚠️ *Deploy to NEW Project*\n\n` +
@@ -286,7 +284,7 @@ bot.action('deploy_existing', async (ctx) => {
 
   const result = await verifyAndListProjects(session.railwayToken);
   if (!result.success || result.projects.length === 0) {
-    ctx.reply('❌ No existing projects found or token invalid.');
+    ctx.reply(`❌ No existing projects found or token invalid.\nError: ${result.error}`);
     return ctx.answerCbQuery();
   }
 
@@ -311,14 +309,13 @@ bot.on('text', async (ctx) => {
   const session = getSession(userId);
   const text = ctx.message.text.trim();
 
-  // Ignore commands (they are handled separately)
   if (text.startsWith('/')) return;
 
   // ---- STATE: waiting_token ----
   if (session.stage === 'waiting_token') {
     session.railwayToken = text;
     session.stage = 'verifying';
-    ctx.reply('⏳ Verifying token...');
+    ctx.reply('⏳ Verifying token via API...');
 
     const result = await verifyAndListProjects(text);
     if (!result.success) {
@@ -387,7 +384,6 @@ bot.on('text', async (ctx) => {
     }
   }
 
-  // ---- IDLE ----
   else {
     ctx.reply('Please use the menu buttons or /deploy to start.');
   }
@@ -403,6 +399,5 @@ bot.launch().then(() => {
   console.error('❌ Launch error:', err);
 });
 
-// Graceful stop
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
