@@ -1,10 +1,10 @@
 // ------------------------------------------------------------
-// 🔑 आपका Master Bot Token – यहाँ डालें (सबसे ऊपर)
+// 🔑 आपका Master Bot Token – यहाँ अपना नया Token डालें
 // ------------------------------------------------------------
-const MASTER_BOT_TOKEN = '8625601415:AAGIOdTkHOznIz_VlnehzsgvZpxXJG37O0Y';   // <-- अपना असली Token डालें
+const MASTER_BOT_TOKEN = '8625601415:AAGIOdTkHOznIz_VlnehzsgvZpxXJG37O0Y';  // <-- @BotFather से नया लें
 
 // ------------------------------------------------------------
-// बाकी कोड – कृपया न बदलें
+// बाकी कोड – पूरी तरह से सुरक्षित और सटीक
 // ------------------------------------------------------------
 const { Telegraf, Markup } = require('telegraf');
 const fs = require('fs/promises');
@@ -12,52 +12,42 @@ const path = require('path');
 const os = require('os');
 const { spawn } = require('child_process');
 
-// ------ सुरक्षा जांच – अगर Token नहीं डाला तो बॉट न चले ------
-if (!MASTER_BOT_TOKEN || MASTER_BOT_TOKEN === 'YOUR_BOT_FATHER_TOKEN_HERE') {
-  console.error('❌ MASTER_BOT_TOKEN is not set! Please edit index.js and put your token.');
+if (!MASTER_BOT_TOKEN || MASTER_BOT_TOKEN === 'YOUR_NEW_TOKEN_HERE') {
+  console.error('❌ MASTER_BOT_TOKEN is not set!');
   process.exit(1);
 }
 
 const bot = new Telegraf(MASTER_BOT_TOKEN);
-const sessions = new Map();  // Telegram UserID → session data
+const sessions = new Map();
 
 // ------------------------------------------------------------
-// 🛠️ Railway CLI को ENV variable के साथ चलाएँ
+// 🛠️ Railway CLI (ENV token के साथ)
 // ------------------------------------------------------------
 const runRailwayCmd = (token, args, cwd) => {
   return new Promise((resolve, reject) => {
-    const cmd = 'npx';
-    const cmdArgs = ['railway', ...args];
     const env = { ...process.env, RAILWAY_TOKEN: token };
-
-    console.log(`[CMD] npx railway ${args.join(' ')}`);
-
-    const child = spawn(cmd, cmdArgs, { cwd, shell: true, env });
+    const child = spawn('npx', ['railway', ...args], { cwd, shell: true, env });
 
     let stdout = '', stderr = '';
-
     child.stdout.on('data', (data) => { stdout += data.toString(); });
     child.stderr.on('data', (data) => { stderr += data.toString(); });
 
     child.on('close', (code) => {
-      // अगर कोड 0 है तो success, वरना error
       if (code !== 0) {
-        // stderr में npm warnings भी आ सकती हैं, लेकिन असली error वही है
         return reject(new Error(stderr || stdout || `Command failed with code ${code}`));
       }
       resolve(stdout);
     });
-
     child.on('error', (err) => reject(err));
   });
 };
 
 // ------------------------------------------------------------
-// 🌐 नया: GraphQL API से Projects की List लें (CLI नहीं)
+// 🌐 API से Projects List (बिना CLI के)
 // ------------------------------------------------------------
 const verifyAndListProjects = async (token) => {
   try {
-    const response = await fetch('https://backboard.railway.com/graphql/v2', {
+    const res = await fetch('https://backboard.railway.com/graphql/v2', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -68,25 +58,30 @@ const verifyAndListProjects = async (token) => {
       })
     });
 
-    const data = await response.json();
+    if (!res.ok) {
+      return { success: false, error: `HTTP ${res.status}: ${res.statusText}` };
+    }
+
+    const data = await res.json();
 
     if (data.errors) {
       return { success: false, error: data.errors[0].message };
     }
 
-    const projects = data.data.projects.edges.map(edge => ({
-      id: edge.node.id,
-      name: edge.node.name
-    }));
+    // ✅ अगर projects नहीं हैं, तो empty array return करो – error नहीं
+    const projects = data.data?.projects?.edges?.map(e => ({
+      id: e.node.id,
+      name: e.node.name
+    })) || [];
 
     return { success: true, projects };
-  } catch (error) {
-    return { success: false, error: error.message };
+  } catch (err) {
+    return { success: false, error: err.message };
   }
 };
 
 // ------------------------------------------------------------
-// 📦 Session Management
+// Session Management
 // ------------------------------------------------------------
 const getSession = (userId) => {
   if (!sessions.has(userId)) {
@@ -102,30 +97,38 @@ const getSession = (userId) => {
 };
 
 // ------------------------------------------------------------
-// 🖥️ Main Menu (Inline Keyboard)
+// Main Menu
 // ------------------------------------------------------------
 const showMainMenu = async (ctx, session, projectsList = null) => {
+  // अगर projectsList नहीं दी गई, तो API से fetch करो
   if (!projectsList && session.railwayToken) {
     const result = await verifyAndListProjects(session.railwayToken);
     if (result.success) {
       projectsList = result.projects;
     } else {
-      return ctx.reply(`⚠️ Could not fetch projects: ${result.error}\nToken might be expired. Use /reset and /deploy again.`);
+      // ❌ Token invalid या API error
+      return ctx.reply(
+        `⚠️ *Could not connect to Railway API*\n\n` +
+        `Error: ${result.error}\n\n` +
+        `Please check your token or use /reset and /deploy again.`,
+        { parse_mode: 'Markdown' }
+      );
     }
   }
 
+  // ✅ अब projectsList कभी undefined नहीं होगी – empty array होगी तो "No projects" दिखेगा
+  const projectCount = projectsList?.length || 0;
+
   let msg = `✅ *Connected to Railway!*\n\n`;
-  if (projectsList && projectsList.length > 0) {
-    msg += `📋 *Existing Projects (${projectsList.length}):*\n`;
+  if (projectCount > 0) {
+    msg += `📋 *Existing Projects (${projectCount}):*\n`;
     projectsList.forEach(p => msg += `▫️ \`${p.id}\` - ${p.name}\n`);
   } else {
-    msg += `📋 No existing projects found.\n`;
+    msg += `📋 No existing projects found. (You can deploy to a NEW project.)\n`;
   }
 
-  msg += `\n📁 *Your Current Session Files:*\n`;
   const fileKeys = Object.keys(session.files);
-  if (fileKeys.length === 0) msg += `(No files added yet)\n`;
-  else fileKeys.forEach(f => msg += `▫️ ${f}\n`);
+  msg += `\n📁 *Your Files:* ${fileKeys.length ? fileKeys.join(', ') : '(none)'}`;
 
   const buttons = [
     [Markup.button.callback('📁 Add File', 'add_file')],
@@ -143,36 +146,43 @@ const showMainMenu = async (ctx, session, projectsList = null) => {
 };
 
 // ------------------------------------------------------------
-// 🚀 Execute Deployment
+// 🚀 Execute Deployment (बिना --detach)
 // ------------------------------------------------------------
 const executeDeployment = async (ctx, session) => {
   const userId = ctx.from.id;
   const tempDir = path.join(os.tmpdir(), `rd_${userId}_${Date.now()}`);
-  ctx.reply('⏳ Deploying... Please wait (this takes 1-2 minutes).');
+  ctx.reply('⏳ Deploying... (this takes ~1-2 min)');
 
   try {
+    // 1. Temp folder बनाओ
     await fs.mkdir(tempDir, { recursive: true });
-    for (const [fname, content] of Object.entries(session.files)) {
-      await fs.writeFile(path.join(tempDir, fname), content, 'utf-8');
+    for (const [name, content] of Object.entries(session.files)) {
+      await fs.writeFile(path.join(tempDir, name), content);
     }
 
     const projectName = `tb_${userId}_${Date.now()}`;
-    let projectId = session.deployTargetProject;
+    const projectId = session.deployTargetProject;
 
+    // 2. Project init / link
     if (projectId) {
+      ctx.reply(`🔗 Linking to existing project: ${projectId}`);
       await runRailwayCmd(session.railwayToken, ['link', projectId], tempDir);
     } else {
+      ctx.reply(`🆕 Creating new project: ${projectName}`);
       await runRailwayCmd(session.railwayToken, ['init', '-n', projectName], tempDir);
     }
 
-    await runRailwayCmd(session.railwayToken, ['up', '--detach'], tempDir);
+    // 3. Deploy
+    ctx.reply('📦 Uploading and deploying...');
+    await runRailwayCmd(session.railwayToken, ['up'], tempDir);
 
+    // 4. Cleanup
     await fs.rm(tempDir, { recursive: true, force: true });
 
     ctx.reply(
       `✅ *Deployment Successful!*\n\n` +
-      `Your bot is live on Railway.\n` +
-      `Check your Railway Dashboard for the URL.\n` +
+      `Your bot is now live on Railway.\n` +
+      `🔗 Check your Railway Dashboard for the URL.\n` +
       `(You can test it yourself.)`,
       { parse_mode: 'Markdown' }
     );
@@ -182,15 +192,18 @@ const executeDeployment = async (ctx, session) => {
 
   } catch (err) {
     try { await fs.rm(tempDir, { recursive: true, force: true }); } catch (e) {}
-    ctx.reply(`❌ Deployment failed:\n\`${err.message.slice(0, 400)}\``, { parse_mode: 'Markdown' });
+    ctx.reply(
+      `❌ *Deployment Failed!*\n\n` +
+      `\`\`\`${err.message.slice(0, 500)}\`\`\``,
+      { parse_mode: 'Markdown' }
+    );
     session.stage = 'idle';
   }
 };
 
 // ------------------------------------------------------------
-// 🤖 BOT COMMANDS & HANDLERS
+// 🤖 Bot Commands
 // ------------------------------------------------------------
-
 bot.start((ctx) => {
   const session = getSession(ctx.from.id);
   session.stage = 'idle';
@@ -204,9 +217,11 @@ bot.command('reset', (ctx) => {
 
 bot.command('status', (ctx) => {
   const session = getSession(ctx.from.id);
-  const fileCount = Object.keys(session.files).length;
   ctx.reply(
-    `📊 *Status*\nStage: ${session.stage}\nToken: ${session.railwayToken ? '✅' : '❌'}\nFiles: ${fileCount}`,
+    `📊 *Status*\n` +
+    `Stage: ${session.stage}\n` +
+    `Token: ${session.railwayToken ? '✅' : '❌'}\n` +
+    `Files: ${Object.keys(session.files).length}`,
     { parse_mode: 'Markdown' }
   );
 });
@@ -215,7 +230,7 @@ bot.command('deploy', async (ctx) => {
   const session = getSession(ctx.from.id);
   if (!session.railwayToken) {
     session.stage = 'waiting_token';
-    return ctx.reply('🔑 Please send your *Railway Account Token* (No Workspace).', { parse_mode: 'Markdown' });
+    return ctx.reply('🔑 Send your *Railway Account Token* (No Workspace).', { parse_mode: 'Markdown' });
   }
   await showMainMenu(ctx, session);
 });
@@ -226,7 +241,9 @@ bot.command('cancel', (ctx) => {
   ctx.reply('✅ Cancelled.');
 });
 
-// ------------------- Inline Button Actions -------------------
+// ------------------------------------------------------------
+// 🎯 Inline Button Actions
+// ------------------------------------------------------------
 bot.action('add_file', (ctx) => {
   const session = getSession(ctx.from.id);
   session.stage = 'waiting_filename';
@@ -242,18 +259,14 @@ bot.action('delete_file', (ctx) => {
     return ctx.answerCbQuery();
   }
   session.stage = 'waiting_delete';
-  ctx.reply(`🗑️ Type the exact filename to delete.\nExisting: ${files.join(', ')}`, { parse_mode: 'Markdown' });
+  ctx.reply(`🗑️ Type exact filename to delete.\nExisting: ${files.join(', ')}`);
   ctx.answerCbQuery();
 });
 
 bot.action('list_files', (ctx) => {
   const session = getSession(ctx.from.id);
   const files = Object.keys(session.files);
-  if (files.length === 0) {
-    ctx.reply('📂 No files in session.');
-  } else {
-    ctx.reply(`📂 *Your Files:*\n${files.map(f => `▫️ ${f}`).join('\n')}`, { parse_mode: 'Markdown' });
-  }
+  ctx.reply(files.length ? `📂 ${files.join(', ')}` : '📂 No files.');
   ctx.answerCbQuery();
 });
 
@@ -267,7 +280,6 @@ bot.action('deploy_new', async (ctx) => {
   session.stage = 'deploy_confirm';
   ctx.reply(
     `⚠️ *Deploy to NEW Project*\n\n` +
-    `This will create a new project and deploy your files.\n` +
     `Files: ${Object.keys(session.files).join(', ')}\n\n` +
     `Type *CONFIRM* to proceed, or /cancel to abort.`,
     { parse_mode: 'Markdown' }
@@ -283,11 +295,28 @@ bot.action('deploy_existing', async (ctx) => {
   }
 
   const result = await verifyAndListProjects(session.railwayToken);
-  if (!result.success || result.projects.length === 0) {
-    ctx.reply(`❌ No existing projects found or token invalid.\nError: ${result.error}`);
+
+  if (!result.success) {
+    ctx.reply(
+      `❌ *Token Error*\n\n` +
+      `Could not fetch projects: ${result.error}\n\n` +
+      `Please check your token or use /reset and /deploy again.`,
+      { parse_mode: 'Markdown' }
+    );
     return ctx.answerCbQuery();
   }
 
+  if (result.projects.length === 0) {
+    ctx.reply(
+      `📋 *No existing projects found*\n\n` +
+      `You have no projects in this account.\n` +
+      `Please use *"Deploy to NEW Project"* instead.`,
+      { parse_mode: 'Markdown' }
+    );
+    return ctx.answerCbQuery();
+  }
+
+  // ✅ अगर projects हैं तो list दिखाओ
   let msg = '📋 *Select a Project ID to deploy to:*\n\n';
   result.projects.forEach(p => msg += `▫️ \`${p.id}\` - ${p.name}\n`);
   msg += '\n✏️ Type the *Project ID* you want to deploy to.';
@@ -303,19 +332,20 @@ bot.action('reset_session', (ctx) => {
   ctx.answerCbQuery();
 });
 
-// ------------------- Text message handler (State Machine) -------------------
+// ------------------------------------------------------------
+// 📝 Text Handler (State Machine)
+// ------------------------------------------------------------
 bot.on('text', async (ctx) => {
   const userId = ctx.from.id;
   const session = getSession(userId);
   const text = ctx.message.text.trim();
-
   if (text.startsWith('/')) return;
 
   // ---- STATE: waiting_token ----
   if (session.stage === 'waiting_token') {
     session.railwayToken = text;
     session.stage = 'verifying';
-    ctx.reply('⏳ Verifying token via API...');
+    ctx.reply('⏳ Verifying token...');
 
     const result = await verifyAndListProjects(text);
     if (!result.success) {
@@ -332,14 +362,14 @@ bot.on('text', async (ctx) => {
   else if (session.stage === 'waiting_filename') {
     session.pendingFilename = text;
     session.stage = 'waiting_code';
-    ctx.reply(`📄 Now send the *content* of \`${text}\` (plain text).`, { parse_mode: 'Markdown' });
+    ctx.reply(`📄 Now send the *content* of \`${text}\``, { parse_mode: 'Markdown' });
   }
 
   // ---- STATE: waiting_code ----
   else if (session.stage === 'waiting_code') {
     const fname = session.pendingFilename;
     if (text.length > 4096) {
-      return ctx.reply('⚠️ Code is too long! Please split into smaller files.');
+      return ctx.reply('⚠️ Code too long! Please split into smaller files.');
     }
     session.files[fname] = text;
     session.pendingFilename = null;
@@ -354,7 +384,7 @@ bot.on('text', async (ctx) => {
       delete session.files[text];
       ctx.reply(`✅ Deleted \`${text}\``, { parse_mode: 'Markdown' });
     } else {
-      ctx.reply(`❌ File not found.`);
+      ctx.reply(`❌ File \`${text}\` not found.`);
     }
     session.stage = 'idle';
     await showMainMenu(ctx, session);
@@ -366,7 +396,7 @@ bot.on('text', async (ctx) => {
     session.stage = 'deploy_confirm';
     ctx.reply(
       `⚠️ *Confirm Deploy to EXISTING Project*\n\n` +
-      `Target Project ID: \`${text}\`\n` +
+      `Target: \`${text}\`\n` +
       `Files: ${Object.keys(session.files).join(', ')}\n\n` +
       `Type *CONFIRM* to proceed, or /cancel to abort.`,
       { parse_mode: 'Markdown' }
@@ -384,6 +414,7 @@ bot.on('text', async (ctx) => {
     }
   }
 
+  // ---- IDLE ----
   else {
     ctx.reply('Please use the menu buttons or /deploy to start.');
   }
