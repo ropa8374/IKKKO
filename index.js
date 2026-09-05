@@ -78,24 +78,47 @@ const graphqlRequest = async (accountToken, query, variables = {}) => {
   return data.data;
 };
 
-// Token verify + top-level projects list
+// सारी workspaces (personal + कोई team) निकालो
+const getWorkspaces = async (accountToken) => {
+  const data = await graphqlRequest(accountToken, `query { me { workspaces { id name } } }`);
+  return data?.me?.workspaces || [];
+};
+
+// Personal/पहली workspace id (नया project बनाने के लिए डिफ़ॉल्ट)
+const getWorkspaceId = async (accountToken) => {
+  const workspaces = await getWorkspaces(accountToken);
+  return workspaces.length ? workspaces[0].id : null;
+};
+
+// 🔑 फिक्स: टॉप-लेवल `query { projects {...} }` एक known Railway bug है —
+// जब account में एक से ज़्यादा workspaces (personal + कोई team) हों तो यह
+// randomly/incomplete list देता है। सही तरीका: हर workspace को अलग से query करो।
 const verifyAndListProjects = async (accountToken) => {
   try {
-    const data = await graphqlRequest(accountToken,
-      `query { projects { edges { node { id name } } } }`
-    );
-    const projects = data?.projects?.edges?.map(e => ({ id: e.node.id, name: e.node.name })) || [];
-    return { success: true, projects };
+    const workspaces = await getWorkspaces(accountToken);
+    if (workspaces.length === 0) return { success: true, projects: [] };
+
+    const allProjects = [];
+    for (const ws of workspaces) {
+      const data = await graphqlRequest(accountToken,
+        `query workspace($id: String!) {
+          workspace(workspaceId: $id) {
+            projects { edges { node { id name } } }
+          }
+        }`,
+        { id: ws.id }
+      );
+      const edges = data?.workspace?.projects?.edges || [];
+      edges.forEach(e => allProjects.push({
+        id: e.node.id,
+        name: e.node.name,
+        workspaceName: ws.name,
+      }));
+    }
+    return { success: true, projects: allProjects };
   } catch (err) {
     return { success: false, error: err.message };
   }
-};
-
-// Personal/Team workspace id (ज़रूरी है project बनाने के लिए)
-const getWorkspaceId = async (accountToken) => {
-  const data = await graphqlRequest(accountToken, `query { me { workspaces { id name } } }`);
-  const workspaces = data?.me?.workspaces || [];
-  return workspaces.length ? workspaces[0].id : null;
 };
 
 // नया project बनाओ — नाम पूरी तरह यूज़र का दिया हुआ, कहीं भी Telegram ID embed नहीं होती
@@ -205,7 +228,9 @@ const showProjectsMenu = async (ctx, session) => {
   session.currentServiceId = null;
   session.currentServiceName = null;
 
-  const buttons = result.projects.map(p => [Markup.button.callback(`📂 ${p.name}`, `proj:${p.id}`)]);
+  const buttons = result.projects.map(p =>
+    [Markup.button.callback(`📂 ${p.name}`, `proj:${p.id}`)]
+  );
   buttons.push([Markup.button.callback('➕ New Project', 'newproj')]);
   buttons.push([Markup.button.callback('❌ Reset Session', 'reset_session')]);
 
