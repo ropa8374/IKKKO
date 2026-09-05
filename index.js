@@ -354,7 +354,10 @@ bot.start((ctx) => {
     `/deploy - Projects खोलें / session शुरू करें\n` +
     `/status - Session status देखें\n` +
     `/reset - सब कुछ साफ़ करें\n\n` +
-    `📌 फ्लो: Projects → Services → Files → Deploy`,
+    `📌 फ्लो: Projects → Services → Files → Deploy\n\n` +
+    `⚠️ *Files भेजते वक़्त ज़रूरी नियम:*\n` +
+    `पूरा code अपने editor से एक ही बार में copy करें और एक ही बार में paste करके भेजें — चाहे कितना भी बड़ा हो। Telegram उसे खुद कई messages में बाँट देगा, बॉट उन्हें सही तरीके से वापस जोड़ लेगा।\n` +
+    `❌ कोड को खुद मैन्युअली टुकड़ों में बाँटकर अलग-अलग बार paste ना करें — इससे lines टूट सकती हैं।`,
     { parse_mode: 'Markdown' }
   );
 });
@@ -585,12 +588,21 @@ bot.on('text', async (ctx) => {
     session.pendingFilename = text;
     session.fileChunks = [];
     session.stage = 'waiting_code';
-    ctx.reply(`📄 Now send content of \`${text}\`. Type \`DONE\` when finished.`, { parse_mode: 'Markdown' });
+    ctx.reply(
+      `📄 Now send content of \`${text}\`.\n\n` +
+      `⚠️ पूरा code एक ही बार में copy-paste करें (Telegram खुद बड़े paste को बाँट देगा, बॉट सही जोड़ लेगा)। खुद से टुकड़ों में मत बाँटिए।\n\n` +
+      `जब पूरा हो जाए तो \`DONE\` टाइप करें।`,
+      { parse_mode: 'Markdown' }
+    );
   }
 
   else if (session.stage === 'waiting_code') {
     if (text.toUpperCase() === 'DONE') {
-      const fullContent = session.fileChunks.join('\n');
+      // 🔑 फिक्स: chunks को बिना किसी separator के जोड़ो। Telegram बड़े
+      // paste को खुद कई messages में बाँट देता है — यह सिर्फ़ character-count
+      // पर आधारित cut है, इसलिए हर chunk के अंदर के \n/spaces पहले से सही हैं;
+      // बीच में अपनी तरफ़ से '\n' जोड़ना ही original text को तोड़ देता है।
+      const fullContent = session.fileChunks.join('');
       const fname = session.pendingFilename;
       if (!fullContent) return ctx.reply('❌ No content!');
       const files = getCurrentFiles(session);
