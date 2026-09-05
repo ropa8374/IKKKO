@@ -4,7 +4,7 @@
 const MASTER_BOT_TOKEN = '8625601415:AAGIOdTkHOznIz_VlnehzsgvZpxXJG37O0Y';
 
 // ------------------------------------------------------------
-// बाकी कोड – FIXED VERSION
+// बाकी कोड – FINAL FIXED VERSION
 // ------------------------------------------------------------
 const { Telegraf, Markup } = require('telegraf');
 const fs = require('fs/promises');
@@ -20,14 +20,17 @@ if (!MASTER_BOT_TOKEN || MASTER_BOT_TOKEN === 'YOUR_BOT_FATHER_TOKEN_HERE') {
 const bot = new Telegraf(MASTER_BOT_TOKEN);
 const sessions = new Map();
 
+const RAILWAY_GRAPHQL_URL = 'https://backboard.railway.com/graphql/v2';
+
 // ------------------------------------------------------------
-// 🛠️ Railway CLI – @railway/cli, STDIN बंद, 120s Timeout
+// 🛠️ Railway CLI – सिर्फ़ `up` के लिए इस्तेमाल होता है, वो भी
+// असली Project Token के साथ (Account Token नहीं)
 // ------------------------------------------------------------
-const runRailwayCmd = (token, args, cwd) => {
+const runRailwayCmd = (projectToken, args, cwd) => {
   return new Promise((resolve, reject) => {
     const child = spawn('npx', ['--yes', '@railway/cli', ...args], {
       cwd,
-      env: { ...process.env, RAILWAY_TOKEN: token },
+      env: { ...process.env, RAILWAY_TOKEN: projectToken },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
@@ -59,24 +62,30 @@ const runRailwayCmd = (token, args, cwd) => {
 };
 
 // ------------------------------------------------------------
-// 🌐 API से Projects List (Token Verify के लिए)
+// 🌐 GraphQL Helper – सारे API calls यहीं से गुज़रते हैं
 // ------------------------------------------------------------
-const verifyAndListProjects = async (token) => {
+const graphqlRequest = async (accountToken, query, variables = {}) => {
+  const res = await fetch(RAILWAY_GRAPHQL_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${accountToken}`
+    },
+    body: JSON.stringify({ query, variables })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (data.errors?.length) throw new Error(data.errors[0].message);
+  return data.data;
+};
+
+// Projects list (Token verify के लिए भी इस्तेमाल होता है)
+const verifyAndListProjects = async (accountToken) => {
   try {
-    const res = await fetch('https://backboard.railway.com/graphql/v2', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
-      },
-      body: JSON.stringify({
-        query: `query { projects { edges { node { id name } } } }`
-      })
-    });
-    if (!res.ok) return { success: false, error: `HTTP ${res.status}` };
-    const data = await res.json();
-    if (data.errors) return { success: false, error: data.errors[0].message };
-    const projects = data.data?.projects?.edges?.map(e => ({
+    const data = await graphqlRequest(accountToken,
+      `query { projects { edges { node { id name } } } }`
+    );
+    const projects = data?.projects?.edges?.map(e => ({
       id: e.node.id,
       name: e.node.name
     })) || [];
@@ -86,6 +95,45 @@ const verifyAndListProjects = async (token) => {
   }
 };
 
+// नया project बनाओ, नया project id वापस मिलता है
+const createProject = async (accountToken, name) => {
+  const data = await graphqlRequest(accountToken,
+    `mutation projectCreate($input: ProjectCreateInput!) {
+      projectCreate(input: $input) { id }
+    }`,
+    { input: { name } }
+  );
+  return data.projectCreate.id;
+};
+
+// किसी project का default environment id निकालो (production को प्राथमिकता)
+const getDefaultEnvironmentId = async (accountToken, projectId) => {
+  const data = await graphqlRequest(accountToken,
+    `query project($id: String!) {
+      project(id: $id) {
+        environments { edges { node { id name } } }
+      }
+    }`,
+    { id: projectId }
+  );
+  const edges = data?.project?.environments?.edges || [];
+  if (edges.length === 0) return null;
+  const prod = edges.find(e => e.node.name?.toLowerCase() === 'production');
+  return (prod || edges[0]).node.id;
+};
+
+// 🔑 असली फिक्स: Account Token से एक Project-scoped Token बनाओ।
+// यही टोकन `railway up` असल में स्वीकार करता है — Account Token नहीं।
+const createProjectToken = async (accountToken, projectId, environmentId, name) => {
+  const data = await graphqlRequest(accountToken,
+    `mutation projectTokenCreate($input: ProjectTokenCreateInput!) {
+      projectTokenCreate(input: $input)
+    }`,
+    { input: { projectId, environmentId, name } }
+  );
+  return data.projectTokenCreate;
+};
+
 // ------------------------------------------------------------
 // 📦 Session Management
 // ------------------------------------------------------------
@@ -93,7 +141,7 @@ const getSession = (userId) => {
   if (!sessions.has(userId)) {
     sessions.set(userId, {
       stage: 'idle',
-      railwayToken: null,
+      railwayToken: null, // यह हमेशा Account Token है
       files: {},
       pendingFilename: null,
       deployTargetProject: null,
@@ -145,7 +193,9 @@ const showMainMenu = async (ctx, session, projectsList = null) => {
 };
 
 // ------------------------------------------------------------
-// 🚀 FINAL DEPLOYMENT – LINK + UP
+// 🚀 FINAL DEPLOYMENT
+// GraphQL से project + environment + project-token बनाओ,
+// फिर सिर्फ़ `railway up` चलाओ (कोई link/init नहीं)
 // ------------------------------------------------------------
 const executeDeployment = (ctx, session) => {
   const userId = ctx.from.id;
@@ -169,28 +219,47 @@ const executeDeployment = (ctx, session) => {
         await fs.writeFile(path.join(tempDir, name), content);
       }
 
-      const projectName = `tb_${userId}_${Date.now()}`;
-      const projectId = session.deployTargetProject;
+      const accountToken = session.railwayToken;
+      let projectId = session.deployTargetProject;
 
-      if (projectId) {
-        // FIX: पहले LINK (Workspace सेट हो जाता है), फिर UP
-        // --project flag दिया गया है ताकि interactive prompt में न फँसे
-        await runRailwayCmd(session.railwayToken, ['link', '--project', projectId], tempDir);
-        await runRailwayCmd(session.railwayToken, ['up'], tempDir);
-      } else {
-        // New Project: INIT + UP
-        await runRailwayCmd(session.railwayToken, ['init', '-n', projectName], tempDir);
-        await runRailwayCmd(session.railwayToken, ['up'], tempDir);
+      // Step 1: नया project चाहिए तो GraphQL से बनाओ (railway init नहीं)
+      if (!projectId) {
+        const projectName = `tb_${userId}_${Date.now()}`;
+        projectId = await createProject(accountToken, projectName);
       }
+
+      // Step 2: environment id निकालो
+      const environmentId = await getDefaultEnvironmentId(accountToken, projectId);
+      if (!environmentId) {
+        throw new Error('Environment नहीं मिला। Project बनने में थोड़ी देर लग सकती है, दोबारा कोशिश करें।');
+      }
+
+      // Step 3: असली Project Token बनाओ (यही `railway up` स्वीकार करेगा)
+      const projectToken = await createProjectToken(
+        accountToken,
+        projectId,
+        environmentId,
+        `bot-deploy-${Date.now()}`
+      );
+      if (!projectToken) {
+        throw new Error('Project Token नहीं बन पाया। Account Token के पास इस project की permission जाँचें।');
+      }
+
+      // Step 4: सिर्फ़ `up` चलाओ — Project Token के साथ, कोई link/init नहीं
+      await runRailwayCmd(projectToken, ['up'], tempDir);
 
       await fs.rm(tempDir, { recursive: true, force: true });
 
-      await ctx.reply('✅ *Deployment triggered successfully!* Your bot will be live shortly on Railway.', { parse_mode: 'Markdown' });
+      await ctx.reply(
+        `✅ *Deployment triggered successfully!*\nProject ID: \`${projectId}\`\nयह जल्द ही Railway पर live हो जाएगा।`,
+        { parse_mode: 'Markdown' }
+      );
 
     } catch (err) {
       try { await fs.rm(tempDir, { recursive: true, force: true }); } catch (e) {}
       await ctx.reply(
-        `❌ *Deployment Failed!*\n\nReason:\n\`\`\`${err.message.slice(0, 600)}\`\`\`\n\n(If you see "missing package.json", please add it.)`,
+        `❌ *Deployment Failed!*\n\nReason:\n\`\`\`${err.message.slice(0, 600)}\`\`\`\n\n` +
+        `(अगर "Not Authorized" दिखे, तो आपका Account Token इस project तक access नहीं रखता — नया Account Token बनाएँ, Workspace select ना करें।)`,
         { parse_mode: 'Markdown' }
       );
     }
@@ -238,7 +307,11 @@ bot.command('deploy', async (ctx) => {
   const session = getSession(ctx.from.id);
   if (!session.railwayToken) {
     session.stage = 'waiting_token';
-    return ctx.reply('🔑 Send your *Railway Account Token* (No Workspace).', { parse_mode: 'Markdown' });
+    return ctx.reply(
+      '🔑 Send your *Railway Account Token* (Account → Tokens → "No Workspace" selected).\n\n' +
+      '⚠️ Project Token यहाँ मत भेजें — बॉट को Account Token चाहिए ताकि वो projects बना/list कर सके।',
+      { parse_mode: 'Markdown' }
+    );
   }
   await showMainMenu(ctx, session);
 });
@@ -317,7 +390,7 @@ bot.action('deploy_existing', async (ctx) => {
 
   let msg = '📋 *Select a Project ID:*\n\n';
   result.projects.forEach(p => msg += `▫️ \`${p.id}\` - ${p.name}\n`);
-  msg += '\n✏️ Type the Project ID.';
+  msg += '\n✏️ Type the Project ID.\n\n⚠️ Note: अगर उस project में पहले से एक से ज़्यादा services हैं, तो deploy पहली/default service में जाएगा।';
   session.stage = 'waiting_project_selection';
   ctx.reply(msg, { parse_mode: 'Markdown' });
   ctx.answerCbQuery();
@@ -338,8 +411,8 @@ bot.on('text', async (ctx) => {
   const rawText = ctx.message.text;
   const text = rawText.trim();
 
-  // FIX #1: slash-command check अब सिर्फ़ तभी लगेगा जब हम code collect नहीं
-  // कर रहे — वरना "// comment" वाली lines silently drop हो जाती थीं।
+  // FIX: slash-check सिर्फ़ तभी, जब हम code collect नहीं कर रहे — वरना
+  // "// comment" से शुरू होने वाली lines silently drop हो जाती थीं।
   if (session.stage !== 'waiting_code' && text.startsWith('/')) return;
 
   if (session.stage === 'waiting_token') {
@@ -362,9 +435,8 @@ bot.on('text', async (ctx) => {
     ctx.reply(`📄 Now send content of \`${text}\`. Type \`DONE\` when finished.`, { parse_mode: 'Markdown' });
   }
   else if (session.stage === 'waiting_code') {
-    // DONE की जाँच trimmed text पर, पर actual content raw (untrimmed) रखते हैं
     if (text.toUpperCase() === 'DONE') {
-      // FIX #2: chunks को '\n' से जोड़ो वरना lines आपस में चिपक जाती हैं
+      // FIX: chunks को '\n' से जोड़ो वरना lines आपस में चिपक जाती हैं
       const fullContent = session.fileChunks.join('\n');
       const fname = session.pendingFilename;
       if (!fullContent) return ctx.reply('❌ No content!');
@@ -409,7 +481,7 @@ bot.on('text', async (ctx) => {
 });
 
 // ------------------------------------------------------------
-// 🛡️ GLOBAL ERROR HANDLER (नया — crash से बचाने के लिए)
+// 🛡️ GLOBAL ERROR HANDLER — crash से बचाने के लिए
 // ------------------------------------------------------------
 bot.catch((err, ctx) => {
   console.error(`❌ Unhandled error for update ${ctx?.update?.update_id}:`, err);
