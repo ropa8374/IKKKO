@@ -4,7 +4,8 @@
 const MASTER_BOT_TOKEN = '8625601415:AAGIOdTkHOznIz_VlnehzsgvZpxXJG37O0Y';
 
 // ------------------------------------------------------------
-// बाकी कोड – FINAL FIXED VERSION
+// Railway Master Bot — FINAL VERSION
+// Folder-style navigation: Projects → Services → Files
 // ------------------------------------------------------------
 const { Telegraf, Markup } = require('telegraf');
 const fs = require('fs/promises');
@@ -23,8 +24,7 @@ const sessions = new Map();
 const RAILWAY_GRAPHQL_URL = 'https://backboard.railway.com/graphql/v2';
 
 // ------------------------------------------------------------
-// 🛠️ Railway CLI – सिर्फ़ `up` के लिए इस्तेमाल होता है, वो भी
-// असली Project Token के साथ (Account Token नहीं)
+// 🛠️ Railway CLI – सिर्फ़ `up` के लिए, असली Project Token के साथ
 // ------------------------------------------------------------
 const runRailwayCmd = (projectToken, args, cwd) => {
   return new Promise((resolve, reject) => {
@@ -35,9 +35,8 @@ const runRailwayCmd = (projectToken, args, cwd) => {
     });
 
     let stdout = '', stderr = '';
-
-    child.stdout.on('data', (data) => { stdout += data.toString(); });
-    child.stderr.on('data', (data) => { stderr += data.toString(); });
+    child.stdout.on('data', (d) => { stdout += d.toString(); });
+    child.stderr.on('data', (d) => { stderr += d.toString(); });
 
     const timeout = setTimeout(() => {
       child.kill();
@@ -48,8 +47,8 @@ const runRailwayCmd = (projectToken, args, cwd) => {
       clearTimeout(timeout);
       if (code !== 0) {
         const fullOutput = (stdout + '\n' + stderr).trim();
-        const errorMsg = fullOutput || `Command failed with code ${code}`;
-        return reject(new Error(errorMsg));
+        reject(new Error(fullOutput || `Command failed with code ${code}`));
+        return;
       }
       resolve(stdout);
     });
@@ -62,7 +61,7 @@ const runRailwayCmd = (projectToken, args, cwd) => {
 };
 
 // ------------------------------------------------------------
-// 🌐 GraphQL Helper – सारे API calls यहीं से गुज़रते हैं
+// 🌐 GraphQL Helpers
 // ------------------------------------------------------------
 const graphqlRequest = async (accountToken, query, variables = {}) => {
   const res = await fetch(RAILWAY_GRAPHQL_URL, {
@@ -79,72 +78,90 @@ const graphqlRequest = async (accountToken, query, variables = {}) => {
   return data.data;
 };
 
-// Projects list (Token verify के लिए भी इस्तेमाल होता है)
+// Token verify + top-level projects list
 const verifyAndListProjects = async (accountToken) => {
   try {
     const data = await graphqlRequest(accountToken,
       `query { projects { edges { node { id name } } } }`
     );
-    const projects = data?.projects?.edges?.map(e => ({
-      id: e.node.id,
-      name: e.node.name
-    })) || [];
+    const projects = data?.projects?.edges?.map(e => ({ id: e.node.id, name: e.node.name })) || [];
     return { success: true, projects };
   } catch (err) {
     return { success: false, error: err.message };
   }
 };
 
-// Account से जुड़ी workspace(s) निकालो — अब project बनाने के लिए
-// workspaceId देना ज़रूरी है, personal account का भी एक होता है
+// Personal/Team workspace id (ज़रूरी है project बनाने के लिए)
 const getWorkspaceId = async (accountToken) => {
-  const data = await graphqlRequest(accountToken,
-    `query { me { workspaces { id name } } }`
-  );
+  const data = await graphqlRequest(accountToken, `query { me { workspaces { id name } } }`);
   const workspaces = data?.me?.workspaces || [];
-  if (workspaces.length === 0) return null;
-  // पहली workspace personal workspace होती है (जब तक कोई टीम workspace ना हो)
-  return workspaces[0].id;
+  return workspaces.length ? workspaces[0].id : null;
 };
 
-// नया project बनाओ, नया project id वापस मिलता है
+// नया project बनाओ — नाम पूरी तरह यूज़र का दिया हुआ, कहीं भी Telegram ID embed नहीं होती
 const createProject = async (accountToken, name) => {
   const workspaceId = await getWorkspaceId(accountToken);
-  if (!workspaceId) {
-    throw new Error('कोई workspace नहीं मिली। Railway dashboard खोलकर देखें कि आपका account किसी workspace से जुड़ा है या नहीं।');
-  }
+  if (!workspaceId) throw new Error('कोई workspace नहीं मिली। Railway dashboard पर account चेक करें।');
   const data = await graphqlRequest(accountToken,
-    `mutation projectCreate($input: ProjectCreateInput!) {
-      projectCreate(input: $input) { id }
-    }`,
+    `mutation projectCreate($input: ProjectCreateInput!) { projectCreate(input: $input) { id } }`,
     { input: { name, workspaceId } }
   );
   return data.projectCreate.id;
 };
 
-// किसी project का default environment id निकालो (production को प्राथमिकता)
-const getDefaultEnvironmentId = async (accountToken, projectId) => {
+const deleteProject = async (accountToken, projectId) => {
+  const data = await graphqlRequest(accountToken,
+    `mutation projectDelete($id: String!) { projectDelete(id: $id) }`,
+    { id: projectId }
+  );
+  return data.projectDelete;
+};
+
+// Project की पूरी जानकारी — नाम, services, environments — एक ही कॉल में
+const getProjectDetails = async (accountToken, projectId) => {
   const data = await graphqlRequest(accountToken,
     `query project($id: String!) {
       project(id: $id) {
+        id
+        name
+        services { edges { node { id name } } }
         environments { edges { node { id name } } }
       }
     }`,
     { id: projectId }
   );
-  const edges = data?.project?.environments?.edges || [];
-  if (edges.length === 0) return null;
-  const prod = edges.find(e => e.node.name?.toLowerCase() === 'production');
-  return (prod || edges[0]).node.id;
+  const p = data?.project;
+  if (!p) return null;
+  const envs = p.environments?.edges?.map(e => e.node) || [];
+  const prodEnv = envs.find(e => e.name?.toLowerCase() === 'production') || envs[0] || null;
+  return {
+    id: p.id,
+    name: p.name,
+    services: p.services?.edges?.map(e => e.node) || [],
+    defaultEnvironmentId: prodEnv?.id || null,
+  };
 };
 
-// 🔑 असली फिक्स: Account Token से एक Project-scoped Token बनाओ।
-// यही टोकन `railway up` असल में स्वीकार करता है — Account Token नहीं।
+const createService = async (accountToken, projectId, name) => {
+  const data = await graphqlRequest(accountToken,
+    `mutation serviceCreate($input: ServiceCreateInput!) { serviceCreate(input: $input) { id name } }`,
+    { input: { projectId, name } }
+  );
+  return data.serviceCreate;
+};
+
+const deleteService = async (accountToken, serviceId) => {
+  const data = await graphqlRequest(accountToken,
+    `mutation serviceDelete($id: String!) { serviceDelete(id: $id) }`,
+    { id: serviceId }
+  );
+  return data.serviceDelete;
+};
+
+// असली Project-scoped token बनाओ — यही `railway up` स्वीकार करता है
 const createProjectToken = async (accountToken, projectId, environmentId, name) => {
   const data = await graphqlRequest(accountToken,
-    `mutation projectTokenCreate($input: ProjectTokenCreateInput!) {
-      projectTokenCreate(input: $input)
-    }`,
+    `mutation projectTokenCreate($input: ProjectTokenCreateInput!) { projectTokenCreate(input: $input) }`,
     { input: { projectId, environmentId, name } }
   );
   return data.projectTokenCreate;
@@ -157,164 +174,176 @@ const getSession = (userId) => {
   if (!sessions.has(userId)) {
     sessions.set(userId, {
       stage: 'idle',
-      railwayToken: null, // यह हमेशा Account Token है
-      files: {},
+      railwayToken: null,        // Account Token
+      currentProjectId: null,
+      currentProjectName: null,
+      currentServiceId: null,
+      currentServiceName: null,
+      serviceFiles: {},          // { [serviceId]: { filename: content } }
       pendingFilename: null,
-      deployTargetProject: null,
       fileChunks: [],
     });
   }
   return sessions.get(userId);
 };
 
-// ------------------------------------------------------------
-// 🖥️ Main Menu
-// ------------------------------------------------------------
-const showMainMenu = async (ctx, session, projectsList = null) => {
-  if (!projectsList && session.railwayToken) {
-    const result = await verifyAndListProjects(session.railwayToken);
-    if (result.success) projectsList = result.projects;
-    else return ctx.reply(`⚠️ API Error: ${result.error}`, { parse_mode: 'Markdown' });
-  }
-
-  const projectCount = projectsList?.length || 0;
-  let msg = `✅ *Connected to Railway!*\n\n`;
-  if (projectCount > 0) {
-    msg += `📋 *Existing Projects (${projectCount}):*\n`;
-    projectsList.forEach(p => msg += `▫️ \`${p.id}\` - ${p.name}\n`);
-  } else {
-    msg += `📋 No existing projects found.\n`;
-  }
-
-  const fileKeys = Object.keys(session.files);
-  msg += `\n📁 *Your Files:* ${fileKeys.length ? fileKeys.join(', ') : '(none)'}`;
-
-  if (!session.files['package.json'] && Object.keys(session.files).length > 0) {
-    msg += `\n\n⚠️ *Missing package.json!* Railway needs it to deploy Node.js apps.`;
-  }
-
-  const buttons = [
-    [Markup.button.callback('📁 Add File', 'add_file')],
-    [Markup.button.callback('🗑️ Delete File', 'delete_file')],
-    [Markup.button.callback('📂 List Files', 'list_files')],
-    [Markup.button.callback('🚀 Deploy to NEW Project', 'deploy_new')],
-    [Markup.button.callback('⬆️ Deploy to EXISTING Project', 'deploy_existing')],
-    [Markup.button.callback('❌ Reset Session', 'reset_session')],
-  ];
-
-  await ctx.reply(msg, {
-    parse_mode: 'Markdown',
-    ...Markup.inlineKeyboard(buttons)
-  });
+const getCurrentFiles = (session) => {
+  if (!session.currentServiceId) return {};
+  if (!session.serviceFiles[session.currentServiceId]) session.serviceFiles[session.currentServiceId] = {};
+  return session.serviceFiles[session.currentServiceId];
 };
 
 // ------------------------------------------------------------
-// 🚀 FINAL DEPLOYMENT
-// GraphQL से project + environment + project-token बनाओ,
-// फिर सिर्फ़ `railway up` चलाओ (कोई link/init नहीं)
+// 🖥️ UI: Projects List (टॉप लेवल)
 // ------------------------------------------------------------
-const executeDeployment = (ctx, session) => {
-  const userId = ctx.from.id;
-  const tempDir = path.join(os.tmpdir(), `rd_${userId}_${Date.now()}`);
+const showProjectsMenu = async (ctx, session) => {
+  const result = await verifyAndListProjects(session.railwayToken);
+  if (!result.success) return ctx.reply(`⚠️ API Error: ${result.error}`, { parse_mode: 'Markdown' });
 
-  if (!session.files['package.json']) {
+  session.currentProjectId = null;
+  session.currentProjectName = null;
+  session.currentServiceId = null;
+  session.currentServiceName = null;
+
+  const buttons = result.projects.map(p => [Markup.button.callback(`📂 ${p.name}`, `proj:${p.id}`)]);
+  buttons.push([Markup.button.callback('➕ New Project', 'newproj')]);
+  buttons.push([Markup.button.callback('❌ Reset Session', 'reset_session')]);
+
+  const msg = result.projects.length
+    ? `📋 *Your Projects (${result.projects.length}):*\nकिसी project पर टैप करें उसे खोलने के लिए।`
+    : `📋 कोई project नहीं मिला। नया बनाएँ:`;
+
+  await ctx.reply(msg, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) });
+};
+
+// ------------------------------------------------------------
+// 🖥️ UI: Services List (किसी एक Project के अंदर)
+// ------------------------------------------------------------
+const showServicesMenu = async (ctx, session) => {
+  const details = await getProjectDetails(session.railwayToken, session.currentProjectId);
+  if (!details) return ctx.reply('❌ Project नहीं मिला (शायद डिलीट हो चुका है)।');
+
+  session.currentProjectName = details.name;
+  session.currentServiceId = null;
+  session.currentServiceName = null;
+
+  const buttons = details.services.map(s => [Markup.button.callback(`⚙️ ${s.name}`, `svc:${s.id}`)]);
+  buttons.push([Markup.button.callback('➕ New Service', 'newsvc')]);
+  buttons.push([Markup.button.callback('🗑️ Delete This Project', 'delproj')]);
+  buttons.push([Markup.button.callback('⬅️ Back to Projects', 'backprojects')]);
+
+  const msg = details.services.length
+    ? `📂 *${details.name}*\n⚙️ *Services (${details.services.length}):*`
+    : `📂 *${details.name}*\nइस project में अभी कोई service नहीं है।`;
+
+  await ctx.reply(msg, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) });
+};
+
+// ------------------------------------------------------------
+// 🖥️ UI: एक Service के अंदर (Files + Deploy)
+// ------------------------------------------------------------
+const showServiceMenu = async (ctx, session) => {
+  const files = getCurrentFiles(session);
+  const fileKeys = Object.keys(files);
+
+  let msg = `⚙️ *${session.currentServiceName}*\n📂 Project: ${session.currentProjectName}\n\n`;
+  msg += `📁 *Files:* ${fileKeys.length ? fileKeys.join(', ') : '(none)'}`;
+  if (!files['package.json'] && fileKeys.length > 0) {
+    msg += `\n\n⚠️ *Missing package.json!* Railway को Node.js app पहचानने के लिए यह ज़रूरी है।`;
+  }
+
+  const buttons = [
+    [Markup.button.callback('📁 Add File', 'addfile')],
+    [Markup.button.callback('🗑️ Delete File', 'delfile')],
+    [Markup.button.callback('📂 List Files', 'listfiles')],
+    [Markup.button.callback('🚀 Deploy This Service', 'deploy_ask')],
+    [Markup.button.callback('🗑️ Delete This Service', 'delsvc')],
+    [Markup.button.callback('⬅️ Back to Services', 'backservices')],
+  ];
+
+  await ctx.reply(msg, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) });
+};
+
+// ------------------------------------------------------------
+// 🚀 Deployment — किसी एक चुनी हुई Service में
+// ------------------------------------------------------------
+const executeServiceDeploy = (ctx, session) => {
+  const userId = ctx.from.id;
+  const tempDir = path.join(os.tmpdir(), `rd_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+  const files = getCurrentFiles(session);
+
+  if (!files['package.json']) {
     return ctx.reply(
-      '❌ *Missing `package.json`!*\n\n' +
-      'Railway needs `package.json` to identify your project as a Node.js app.\n' +
-      'Please add a file named **package.json** using the "Add File" button, then try again.',
+      '❌ *Missing `package.json`!*\nपहले "Add File" से package.json जोड़ें, फिर दोबारा Deploy करें।',
       { parse_mode: 'Markdown' }
     );
   }
 
-  ctx.reply('⏳ *Deployment started!* It will take 1-2 minutes. Check progress here (I will notify if it fails).', { parse_mode: 'Markdown' });
+  const projectId = session.currentProjectId;
+  const serviceId = session.currentServiceId;
+  const serviceName = session.currentServiceName;
+
+  ctx.reply('⏳ *Deployment started!* 1-2 मिनट लगेंगे।', { parse_mode: 'Markdown' });
 
   (async () => {
     try {
       await fs.mkdir(tempDir, { recursive: true });
-      for (const [name, content] of Object.entries(session.files)) {
+      for (const [name, content] of Object.entries(files)) {
         await fs.writeFile(path.join(tempDir, name), content);
       }
 
       const accountToken = session.railwayToken;
-      let projectId = session.deployTargetProject;
-
-      // Step 1: नया project चाहिए तो GraphQL से बनाओ (railway init नहीं)
-      if (!projectId) {
-        const projectName = `tb_${userId}_${Date.now()}`;
-        projectId = await createProject(accountToken, projectName);
+      const details = await getProjectDetails(accountToken, projectId);
+      if (!details || !details.defaultEnvironmentId) {
+        throw new Error('Environment नहीं मिला।');
       }
 
-      // Step 2: environment id निकालो
-      const environmentId = await getDefaultEnvironmentId(accountToken, projectId);
-      if (!environmentId) {
-        throw new Error('Environment नहीं मिला। Project बनने में थोड़ी देर लग सकती है, दोबारा कोशिश करें।');
-      }
-
-      // Step 3: असली Project Token बनाओ (यही `railway up` स्वीकार करेगा)
       const projectToken = await createProjectToken(
-        accountToken,
-        projectId,
-        environmentId,
-        `bot-deploy-${Date.now()}`
+        accountToken, projectId, details.defaultEnvironmentId, `bot-deploy-${Date.now()}`
       );
-      if (!projectToken) {
-        throw new Error('Project Token नहीं बन पाया। Account Token के पास इस project की permission जाँचें।');
-      }
+      if (!projectToken) throw new Error('Project Token नहीं बन पाया।');
 
-      // Step 4: सिर्फ़ `up` चलाओ — Project Token के साथ, कोई link/init नहीं
-      await runRailwayCmd(projectToken, ['up'], tempDir);
+      // 🔑 --service से बताया जा रहा है कि किस service में deploy करना है
+      await runRailwayCmd(projectToken, ['up', '--service', serviceId], tempDir);
 
       await fs.rm(tempDir, { recursive: true, force: true });
-
-      await ctx.reply(
-        `✅ *Deployment triggered successfully!*\nProject ID: \`${projectId}\`\nयह जल्द ही Railway पर live हो जाएगा।`,
-        { parse_mode: 'Markdown' }
-      );
-
+      await ctx.reply(`✅ *Deployment triggered!*\nService: \`${serviceName}\` जल्द ही live होगी।`, { parse_mode: 'Markdown' });
     } catch (err) {
       try { await fs.rm(tempDir, { recursive: true, force: true }); } catch (e) {}
       await ctx.reply(
-        `❌ *Deployment Failed!*\n\nReason:\n\`\`\`${err.message.slice(0, 600)}\`\`\`\n\n` +
-        `(अगर "Not Authorized" दिखे, तो आपका Account Token इस project तक access नहीं रखता — नया Account Token बनाएँ, Workspace select ना करें।)`,
+        `❌ *Deployment Failed!*\n\`\`\`${err.message.slice(0, 600)}\`\`\``,
         { parse_mode: 'Markdown' }
       );
     }
   })();
-
-  session.stage = 'idle';
-  session.deployTargetProject = null;
 };
 
 // ------------------------------------------------------------
-// 🤖 COMMANDS & BUTTONS
+// 🤖 COMMANDS
 // ------------------------------------------------------------
 bot.start((ctx) => {
   const session = getSession(ctx.from.id);
   session.stage = 'idle';
   ctx.reply(
     `🤖 *Railway Master Bot*\n\n` +
-    `Commands:\n` +
-    `/deploy - Start deployment session\n` +
-    `/status - Check session status\n` +
-    `/reset - Clear all session data\n\n` +
-    `📌 *How to add large code:*\n` +
-    `1. Click "Add File" → Enter filename\n` +
-    `2. Paste code in parts (each part any size)\n` +
-    `3. When finished, type \`DONE\` (in caps) to save the file.`,
+    `/deploy - Projects खोलें / session शुरू करें\n` +
+    `/status - Session status देखें\n` +
+    `/reset - सब कुछ साफ़ करें\n\n` +
+    `📌 फ्लो: Projects → Services → Files → Deploy`,
     { parse_mode: 'Markdown' }
   );
 });
 
 bot.command('reset', (ctx) => {
   sessions.delete(ctx.from.id);
-  ctx.reply('✅ Session reset. Use /deploy to start fresh.');
+  ctx.reply('✅ Session reset. /deploy से दोबारा शुरू करें।');
 });
 
 bot.command('status', (ctx) => {
   const session = getSession(ctx.from.id);
-  const fileCount = Object.keys(session.files).length;
   ctx.reply(
-    `📊 *Status*\nStage: ${session.stage}\nToken: ${session.railwayToken ? '✅' : '❌'}\nFiles: ${fileCount}`,
+    `📊 *Status*\nStage: ${session.stage}\nToken: ${session.railwayToken ? '✅' : '❌'}\n` +
+    `Project: ${session.currentProjectName || '(none)'}\nService: ${session.currentServiceName || '(none)'}`,
     { parse_mode: 'Markdown' }
   );
 });
@@ -324,12 +353,12 @@ bot.command('deploy', async (ctx) => {
   if (!session.railwayToken) {
     session.stage = 'waiting_token';
     return ctx.reply(
-      '🔑 Send your *Railway Account Token* (Account → Tokens → "No Workspace" selected).\n\n' +
-      '⚠️ Project Token यहाँ मत भेजें — बॉट को Account Token चाहिए ताकि वो projects बना/list कर सके।',
+      '🔑 Send your *Railway Account Token* (Account → Tokens → "No Workspace" selected).',
       { parse_mode: 'Markdown' }
     );
   }
-  await showMainMenu(ctx, session);
+  session.stage = 'idle';
+  await showProjectsMenu(ctx, session);
 });
 
 bot.command('cancel', (ctx) => {
@@ -341,74 +370,128 @@ bot.command('cancel', (ctx) => {
 });
 
 // ------------------- INLINE BUTTONS -------------------
-bot.action('add_file', (ctx) => {
+
+bot.action(/^proj:(.+)$/, async (ctx) => {
+  const session = getSession(ctx.from.id);
+  session.currentProjectId = ctx.match[1];
+  await showServicesMenu(ctx, session);
+  ctx.answerCbQuery();
+});
+
+bot.action('newproj', (ctx) => {
+  const session = getSession(ctx.from.id);
+  session.stage = 'waiting_new_project_name';
+  ctx.reply('✏️ नए Project का नाम टाइप करें:');
+  ctx.answerCbQuery();
+});
+
+bot.action('backprojects', async (ctx) => {
+  const session = getSession(ctx.from.id);
+  await showProjectsMenu(ctx, session);
+  ctx.answerCbQuery();
+});
+
+bot.action('delproj', (ctx) => {
+  const session = getSession(ctx.from.id);
+  session.stage = 'waiting_delete_project_confirm';
+  ctx.reply(
+    `⚠️ *पक्का Project डिलीट करना है?*\nइसके अंदर की सारी services भी डिलीट हो जाएँगी — यह वापस नहीं होगा।\n\n` +
+    `Confirm करने के लिए project का यह नाम टाइप करें:\n\`${session.currentProjectName}\``,
+    { parse_mode: 'Markdown' }
+  );
+  ctx.answerCbQuery();
+});
+
+bot.action(/^svc:(.+)$/, async (ctx) => {
+  const session = getSession(ctx.from.id);
+  const serviceId = ctx.match[1];
+  const details = await getProjectDetails(session.railwayToken, session.currentProjectId);
+  const svc = details?.services?.find(s => s.id === serviceId);
+  if (!svc) {
+    ctx.reply('❌ Service नहीं मिली।');
+    return ctx.answerCbQuery();
+  }
+  session.currentServiceId = svc.id;
+  session.currentServiceName = svc.name;
+  await showServiceMenu(ctx, session);
+  ctx.answerCbQuery();
+});
+
+bot.action('newsvc', (ctx) => {
+  const session = getSession(ctx.from.id);
+  session.stage = 'waiting_new_service_name';
+  ctx.reply('✏️ नई Service का नाम टाइप करें:');
+  ctx.answerCbQuery();
+});
+
+bot.action('backservices', async (ctx) => {
+  const session = getSession(ctx.from.id);
+  await showServicesMenu(ctx, session);
+  ctx.answerCbQuery();
+});
+
+bot.action('delsvc', (ctx) => {
+  const session = getSession(ctx.from.id);
+  session.stage = 'waiting_delete_service_confirm';
+  ctx.reply(
+    `⚠️ *पक्का Service डिलीट करना है?*\nयह वापस नहीं होगा।\n\n` +
+    `Confirm करने के लिए service का यह नाम टाइप करें:\n\`${session.currentServiceName}\``,
+    { parse_mode: 'Markdown' }
+  );
+  ctx.answerCbQuery();
+});
+
+bot.action('addfile', (ctx) => {
   const session = getSession(ctx.from.id);
   session.stage = 'waiting_filename';
   session.fileChunks = [];
   ctx.reply(
-    `✏️ Enter the *filename* (e.g., \`index.js\`, \`package.json\`).\n\nAfter this, paste your code in parts.\nWhen finished, type \`DONE\`.`,
+    `✏️ Enter the *filename* (e.g., \`index.js\`, \`package.json\`).\n\nफिर code parts में पेस्ट करें, आख़िर में \`DONE\` टाइप करें।`,
     { parse_mode: 'Markdown' }
   );
   ctx.answerCbQuery();
 });
 
-bot.action('delete_file', (ctx) => {
+bot.action('delfile', (ctx) => {
   const session = getSession(ctx.from.id);
-  const files = Object.keys(session.files);
-  if (files.length === 0) {
-    ctx.reply('❌ No files to delete.');
+  const files = getCurrentFiles(session);
+  const keys = Object.keys(files);
+  if (keys.length === 0) {
+    ctx.reply('❌ कोई file नहीं।');
     return ctx.answerCbQuery();
   }
-  session.stage = 'waiting_delete';
-  ctx.reply(`🗑️ Type the exact filename to delete.\nExisting: ${files.join(', ')}`);
+  session.stage = 'waiting_delete_filename';
+  ctx.reply(`🗑️ Delete करने के लिए exact filename टाइप करें।\nMौजूद: ${keys.join(', ')}`);
   ctx.answerCbQuery();
 });
 
-bot.action('list_files', (ctx) => {
+bot.action('listfiles', (ctx) => {
   const session = getSession(ctx.from.id);
-  const files = Object.keys(session.files);
-  ctx.reply(files.length ? `📂 ${files.join(', ')}` : '📂 No files.');
+  const files = getCurrentFiles(session);
+  const keys = Object.keys(files);
+  ctx.reply(keys.length ? `📂 ${keys.join(', ')}` : '📂 No files.');
   ctx.answerCbQuery();
 });
 
-bot.action('deploy_new', async (ctx) => {
+bot.action('deploy_ask', (ctx) => {
   const session = getSession(ctx.from.id);
-  if (Object.keys(session.files).length === 0) {
-    ctx.reply('❌ No files to deploy. Add files first!');
-    return ctx.answerCbQuery();
-  }
-  session.deployTargetProject = null;
-  session.stage = 'deploy_confirm';
   ctx.reply(
-    `⚠️ *Deploy to NEW Project*\n\nFiles: ${Object.keys(session.files).join(', ')}\n\nType *CONFIRM* to proceed.`,
-    { parse_mode: 'Markdown' }
+    `🚀 *${session.currentServiceName}* में deploy करें?`,
+    { parse_mode: 'Markdown', ...Markup.inlineKeyboard([
+      [Markup.button.callback('✅ Yes, Deploy', 'deploy_yes'), Markup.button.callback('❌ Cancel', 'deploy_no')]
+    ])}
   );
   ctx.answerCbQuery();
 });
 
-bot.action('deploy_existing', async (ctx) => {
+bot.action('deploy_yes', (ctx) => {
   const session = getSession(ctx.from.id);
-  if (Object.keys(session.files).length === 0) {
-    ctx.reply('❌ No files to deploy.');
-    return ctx.answerCbQuery();
-  }
+  executeServiceDeploy(ctx, session);
+  ctx.answerCbQuery();
+});
 
-  const result = await verifyAndListProjects(session.railwayToken);
-  if (!result.success) {
-    ctx.reply(`❌ Token Error: ${result.error}`);
-    return ctx.answerCbQuery();
-  }
-
-  if (result.projects.length === 0) {
-    ctx.reply(`📋 No existing projects found.\nPlease use *"Deploy to NEW Project"*.`, { parse_mode: 'Markdown' });
-    return ctx.answerCbQuery();
-  }
-
-  let msg = '📋 *Select a Project ID:*\n\n';
-  result.projects.forEach(p => msg += `▫️ \`${p.id}\` - ${p.name}\n`);
-  msg += '\n✏️ Type the Project ID.\n\n⚠️ Note: अगर उस project में पहले से एक से ज़्यादा services हैं, तो deploy पहली/default service में जाएगा।';
-  session.stage = 'waiting_project_selection';
-  ctx.reply(msg, { parse_mode: 'Markdown' });
+bot.action('deploy_no', (ctx) => {
+  ctx.reply('❌ Cancelled.');
   ctx.answerCbQuery();
 });
 
@@ -419,7 +502,7 @@ bot.action('reset_session', (ctx) => {
 });
 
 // ------------------------------------------------------------
-// 📝 TEXT HANDLER (State Machine) — FIXED
+// 📝 TEXT HANDLER (State Machine)
 // ------------------------------------------------------------
 bot.on('text', async (ctx) => {
   const userId = ctx.from.id;
@@ -427,8 +510,7 @@ bot.on('text', async (ctx) => {
   const rawText = ctx.message.text;
   const text = rawText.trim();
 
-  // FIX: slash-check सिर्फ़ तभी, जब हम code collect नहीं कर रहे — वरना
-  // "// comment" से शुरू होने वाली lines silently drop हो जाती थीं।
+  // slash-check सिर्फ़ तभी, जब code collect नहीं कर रहे
   if (session.stage !== 'waiting_code' && text.startsWith('/')) return;
 
   if (session.stage === 'waiting_token') {
@@ -442,62 +524,124 @@ bot.on('text', async (ctx) => {
       return ctx.reply(`❌ Invalid token: ${result.error}`);
     }
     session.stage = 'idle';
-    await showMainMenu(ctx, session, result.projects);
+    await showProjectsMenu(ctx, session);
   }
+
+  else if (session.stage === 'waiting_new_project_name') {
+    if (!text) return ctx.reply('❌ खाली नाम नहीं चलेगा। दोबारा टाइप करें।');
+    session.stage = 'idle';
+    ctx.reply('⏳ Project बन रहा है...');
+    try {
+      const projectId = await createProject(session.railwayToken, text);
+      session.currentProjectId = projectId;
+      await showServicesMenu(ctx, session);
+    } catch (err) {
+      ctx.reply(`❌ Project नहीं बन पाया: ${err.message}`);
+      await showProjectsMenu(ctx, session);
+    }
+  }
+
+  else if (session.stage === 'waiting_new_service_name') {
+    if (!text) return ctx.reply('❌ खाली नाम नहीं चलेगा। दोबारा टाइप करें।');
+    session.stage = 'idle';
+    ctx.reply('⏳ Service बन रही है...');
+    try {
+      const svc = await createService(session.railwayToken, session.currentProjectId, text);
+      session.currentServiceId = svc.id;
+      session.currentServiceName = svc.name;
+      await showServiceMenu(ctx, session);
+    } catch (err) {
+      ctx.reply(`❌ Service नहीं बन पाई: ${err.message}`);
+      await showServicesMenu(ctx, session);
+    }
+  }
+
   else if (session.stage === 'waiting_filename') {
     session.pendingFilename = text;
     session.fileChunks = [];
     session.stage = 'waiting_code';
     ctx.reply(`📄 Now send content of \`${text}\`. Type \`DONE\` when finished.`, { parse_mode: 'Markdown' });
   }
+
   else if (session.stage === 'waiting_code') {
     if (text.toUpperCase() === 'DONE') {
-      // FIX: chunks को '\n' से जोड़ो वरना lines आपस में चिपक जाती हैं
       const fullContent = session.fileChunks.join('\n');
       const fname = session.pendingFilename;
       if (!fullContent) return ctx.reply('❌ No content!');
-      session.files[fname] = fullContent;
+      const files = getCurrentFiles(session);
+      files[fname] = fullContent;
       session.pendingFilename = null;
       session.fileChunks = [];
       session.stage = 'idle';
       ctx.reply(`✅ File \`${fname}\` saved! (${fullContent.length} chars)`, { parse_mode: 'Markdown' });
-      await showMainMenu(ctx, session);
+      await showServiceMenu(ctx, session);
       return;
     }
-    // raw (untrimmed) text push करो ताकि indentation सुरक्षित रहे
     session.fileChunks.push(rawText);
     const total = session.fileChunks.reduce((a, c) => a + c.length, 0);
     ctx.reply(`📥 Part received (${rawText.length} chars). Total: ${total}. Send more or \`DONE\`.`);
   }
-  else if (session.stage === 'waiting_delete') {
-    if (session.files[text]) {
-      delete session.files[text];
+
+  else if (session.stage === 'waiting_delete_filename') {
+    const files = getCurrentFiles(session);
+    if (files[text]) {
+      delete files[text];
       ctx.reply(`✅ Deleted \`${text}\``, { parse_mode: 'Markdown' });
-    } else ctx.reply(`❌ Not found.`);
-    session.stage = 'idle';
-    await showMainMenu(ctx, session);
-  }
-  else if (session.stage === 'waiting_project_selection') {
-    session.deployTargetProject = text;
-    session.stage = 'deploy_confirm';
-    ctx.reply(`⚠️ Confirm deploy to \`${text}\`? Type CONFIRM.`, { parse_mode: 'Markdown' });
-  }
-  else if (session.stage === 'deploy_confirm') {
-    if (text.toUpperCase() === 'CONFIRM') {
-      executeDeployment(ctx, session);
     } else {
-      ctx.reply('❌ Cancelled.');
-      session.stage = 'idle';
-      await showMainMenu(ctx, session);
+      ctx.reply(`❌ Not found.`);
+    }
+    session.stage = 'idle';
+    await showServiceMenu(ctx, session);
+  }
+
+  else if (session.stage === 'waiting_delete_project_confirm') {
+    session.stage = 'idle';
+    if (text !== session.currentProjectName) {
+      ctx.reply('❌ नाम match नहीं हुआ, delete cancel किया।');
+      return await showServicesMenu(ctx, session);
+    }
+    ctx.reply('⏳ Project डिलीट हो रहा है...');
+    try {
+      await deleteProject(session.railwayToken, session.currentProjectId);
+      // उस project की सारी services की local files भी साफ़ करो
+      const details = await getProjectDetails(session.railwayToken, session.currentProjectId).catch(() => null);
+      if (details) details.services.forEach(s => delete session.serviceFiles[s.id]);
+      ctx.reply('✅ Project डिलीट हो गया।');
+      await showProjectsMenu(ctx, session);
+    } catch (err) {
+      ctx.reply(`❌ Delete नहीं हो पाया: ${err.message}`);
+      await showServicesMenu(ctx, session);
     }
   }
+
+  else if (session.stage === 'waiting_delete_service_confirm') {
+    session.stage = 'idle';
+    if (text !== session.currentServiceName) {
+      ctx.reply('❌ नाम match नहीं हुआ, delete cancel किया।');
+      return await showServiceMenu(ctx, session);
+    }
+    ctx.reply('⏳ Service डिलीट हो रही है...');
+    try {
+      await deleteService(session.railwayToken, session.currentServiceId);
+      delete session.serviceFiles[session.currentServiceId];
+      ctx.reply('✅ Service डिलीट हो गई।');
+      await showServicesMenu(ctx, session);
+    } catch (err) {
+      ctx.reply(
+        `❌ Delete नहीं हो पाया: ${err.message}\n\n` +
+        `(यह कभी-कभी Railway की तरफ़ से permission की वजह से fail होता है — ऐसे में Railway dashboard से मैन्युअल delete करें।)`
+      );
+      await showServiceMenu(ctx, session);
+    }
+  }
+
   else {
-    ctx.reply('Please use the menu buttons or /deploy.');
+    ctx.reply('कृपया मेनू बटन इस्तेमाल करें, या /deploy भेजें।');
   }
 });
 
 // ------------------------------------------------------------
-// 🛡️ GLOBAL ERROR HANDLER — crash से बचाने के लिए
+// 🛡️ GLOBAL ERROR HANDLER
 // ------------------------------------------------------------
 bot.catch((err, ctx) => {
   console.error(`❌ Unhandled error for update ${ctx?.update?.update_id}:`, err);
