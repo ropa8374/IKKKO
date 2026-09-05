@@ -95,13 +95,29 @@ const verifyAndListProjects = async (accountToken) => {
   }
 };
 
+// Account से जुड़ी workspace(s) निकालो — अब project बनाने के लिए
+// workspaceId देना ज़रूरी है, personal account का भी एक होता है
+const getWorkspaceId = async (accountToken) => {
+  const data = await graphqlRequest(accountToken,
+    `query { me { workspaces { id name } } }`
+  );
+  const workspaces = data?.me?.workspaces || [];
+  if (workspaces.length === 0) return null;
+  // पहली workspace personal workspace होती है (जब तक कोई टीम workspace ना हो)
+  return workspaces[0].id;
+};
+
 // नया project बनाओ, नया project id वापस मिलता है
 const createProject = async (accountToken, name) => {
+  const workspaceId = await getWorkspaceId(accountToken);
+  if (!workspaceId) {
+    throw new Error('कोई workspace नहीं मिली। Railway dashboard खोलकर देखें कि आपका account किसी workspace से जुड़ा है या नहीं।');
+  }
   const data = await graphqlRequest(accountToken,
     `mutation projectCreate($input: ProjectCreateInput!) {
       projectCreate(input: $input) { id }
     }`,
-    { input: { name } }
+    { input: { name, workspaceId } }
   );
   return data.projectCreate.id;
 };
