@@ -5,7 +5,7 @@ const MASTER_BOT_TOKEN = '8625601415:AAGIOdTkHOznIz_VlnehzsgvZpxXJG37O0Y';
 
 // ------------------------------------------------------------
 // Railway Master Bot — FINAL VERSION
-// Folder-style navigation: Projects → Services → Files
+// Folder-style navigation: Projects → Services → Files → Logs
 // ------------------------------------------------------------
 const { Telegraf, Markup } = require('telegraf');
 const fs = require('fs/promises');
@@ -22,6 +22,7 @@ const bot = new Telegraf(MASTER_BOT_TOKEN);
 const sessions = new Map();
 
 const RAILWAY_GRAPHQL_URL = 'https://backboard.railway.com/graphql/v2';
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ------------------------------------------------------------
 // 🛠️ Railway CLI – सिर्फ़ `up` के लिए, असली Project Token के साथ
@@ -91,8 +92,8 @@ const getWorkspaceId = async (accountToken) => {
 };
 
 // 🔑 फिक्स: टॉप-लेवल `query { projects {...} }` एक known Railway bug है —
-// जब account में एक से ज़्यादा workspaces (personal + कोई team) हों तो यह
-// randomly/incomplete list देता है। सही तरीका: हर workspace को अलग से query करो।
+// यह randomly/incomplete list देता है। सही तरीका: हर workspace को अलग से query करो
+// (चाहे account में 1 workspace हो या ज़्यादा, यही तरीका भरोसेमंद है)।
 const verifyAndListProjects = async (accountToken) => {
   try {
     const workspaces = await getWorkspaces(accountToken);
@@ -190,6 +191,122 @@ const createProjectToken = async (accountToken, projectId, environmentId, name) 
   return data.projectTokenCreate;
 };
 
+// किसी service की सबसे हाल की deployment निकालो
+const getLatestDeployment = async (accountToken, projectId, serviceId, environmentId) => {
+  const data = await graphqlRequest(accountToken,
+    `query deployments($input: DeploymentListInput!, $first: Int) {
+      deployments(input: $input, first: $first) {
+        edges { node { id status createdAt } }
+      }
+    }`,
+    { input: { projectId, serviceId, environmentId }, first: 1 }
+  );
+  const edges = data?.deployments?.edges || [];
+  return edges.length ? edges[0].node : null;
+};
+
+const getDeploymentStatus = async (accountToken, deploymentId) => {
+  const data = await graphqlRequest(accountToken,
+    `query deployment($id: String!) {
+      deployment(id: $id) { id status createdAt url staticUrl }
+    }`,
+    { id: deploymentId }
+  );
+  return data?.deployment || null;
+};
+
+const getBuildLogs = async (accountToken, deploymentId) => {
+  const data = await graphqlRequest(accountToken,
+    `query buildLogs($deploymentId: String!, $limit: Int) {
+      buildLogs(deploymentId: $deploymentId, limit: $limit) { timestamp message severity }
+    }`,
+    { deploymentId, limit: 1000 }
+  );
+  return data?.buildLogs || [];
+};
+
+const getRuntimeLogs = async (accountToken, deploymentId) => {
+  const data = await graphqlRequest(accountToken,
+    `query deploymentLogs($deploymentId: String!, $limit: Int) {
+      deploymentLogs(deploymentId: $deploymentId, limit: $limit) { timestamp message severity }
+    }`,
+    { deploymentId, limit: 1000 }
+  );
+  return data?.deploymentLogs || [];
+};
+
+const getHttpLogs = async (accountToken, deploymentId) => {
+  const data = await graphqlRequest(accountToken,
+    `query httpLogs($deploymentId: String!, $beforeLimit: Int!) {
+      httpLogs(deploymentId: $deploymentId, beforeLimit: $beforeLimit) {
+        timestamp method path httpStatus totalDuration requestId
+      }
+    }`,
+    { deploymentId, beforeLimit: 500 }
+  );
+  return data?.httpLogs || [];
+};
+
+// ------------------------------------------------------------
+// 📝 Log Formatting + Telegram-safe Chunking
+// ------------------------------------------------------------
+const severityEmoji = (sev) => {
+  const s = (sev || '').toLowerCase();
+  if (s.includes('err')) return '❌';
+  if (s.includes('warn')) return '⚠️';
+  return 'ℹ️';
+};
+
+const formatTime = (ts) => {
+  try { return new Date(ts).toISOString().replace('T', ' ').replace('Z', ''); }
+  catch (e) { return String(ts); }
+};
+
+const formatBuildOrRuntimeLogs = (logs) => {
+  if (!logs.length) return '(कोई log नहीं मिला)';
+  return logs.map(l => `${severityEmoji(l.severity)} [${formatTime(l.timestamp)}] ${l.message}`).join('\n');
+};
+
+const formatHttpLogs = (logs) => {
+  if (!logs.length) return '(कोई HTTP log नहीं मिला)';
+  return logs.map(l =>
+    `🌐 [${formatTime(l.timestamp)}] ${l.method} ${l.path} → ${l.httpStatus} (${l.totalDuration}ms) [${l.requestId}]`
+  ).join('\n');
+};
+
+// Telegram के 4096-char limit के हिसाब से chunks बनाओ — लेकिन कभी भी
+// किसी एक line के बीचों-बीच नहीं काटता, हमेशा पूरी line के बाद ही cut लगता है
+const chunkText = (text, maxLen = 3500) => {
+  const lines = text.split('\n');
+  const chunks = [];
+  let current = '';
+  for (let line of lines) {
+    // अगर कोई अकेली line ही maxLen से बड़ी हो (rare), उसे force-split करो
+    while (line.length > maxLen) {
+      if (current) { chunks.push(current); current = ''; }
+      chunks.push(line.slice(0, maxLen));
+      line = line.slice(maxLen);
+    }
+    if ((current + line + '\n').length > maxLen) {
+      if (current) chunks.push(current);
+      current = '';
+    }
+    current += line + '\n';
+  }
+  if (current.trim()) chunks.push(current);
+  return chunks;
+};
+
+// Chunks को क्रम में, एक-एक करके भेजो (plain text — कोई Markdown parse नहीं,
+// क्योंकि logs में `*`/`_`/backtick जैसे characters आ सकते हैं जो Markdown तोड़ देंगे)
+const sendChunked = async (ctx, fullText) => {
+  const chunks = chunkText(fullText);
+  for (let i = 0; i < chunks.length; i++) {
+    await ctx.reply(`[Part ${i + 1}/${chunks.length}]\n${chunks[i]}`);
+    if (i < chunks.length - 1) await sleep(300); // Telegram flood-limit से बचने के लिए
+  }
+};
+
 // ------------------------------------------------------------
 // 📦 Session Management
 // ------------------------------------------------------------
@@ -265,7 +382,7 @@ const showServicesMenu = async (ctx, session) => {
 };
 
 // ------------------------------------------------------------
-// 🖥️ UI: एक Service के अंदर (Files + Deploy)
+// 🖥️ UI: एक Service के अंदर (Files + Deploy + Logs)
 // ------------------------------------------------------------
 const showServiceMenu = async (ctx, session) => {
   const files = getCurrentFiles(session);
@@ -282,6 +399,7 @@ const showServiceMenu = async (ctx, session) => {
     [Markup.button.callback('🗑️ Delete File', 'delfile')],
     [Markup.button.callback('📂 List Files', 'listfiles')],
     [Markup.button.callback('🚀 Deploy This Service', 'deploy_ask')],
+    [Markup.button.callback('📜 View Logs', 'viewlogs')],
     [Markup.button.callback('🗑️ Delete This Service', 'delsvc')],
     [Markup.button.callback('⬅️ Back to Services', 'backservices')],
   ];
@@ -290,10 +408,42 @@ const showServiceMenu = async (ctx, session) => {
 };
 
 // ------------------------------------------------------------
+// 🖥️ UI: Logs Sub-Menu
+// ------------------------------------------------------------
+const showLogsMenu = async (ctx, session) => {
+  await ctx.reply(
+    `📜 *${session.currentServiceName}* के logs — कौन से देखने हैं?`,
+    { parse_mode: 'Markdown', ...Markup.inlineKeyboard([
+      [Markup.button.callback('🔨 Build Logs', 'logs_build')],
+      [Markup.button.callback('🚀 Deploy/Runtime Logs', 'logs_runtime')],
+      [Markup.button.callback('🌐 Network (HTTP) Logs', 'logs_http')],
+      [Markup.button.callback('📊 Deployment Status', 'logs_status')],
+      [Markup.button.callback('⬅️ Back', 'backservicemenu')],
+    ])}
+  );
+};
+
+// लेटेस्ट deployment पकड़ने का common helper
+const resolveLatestDeployment = async (ctx, session) => {
+  const details = await getProjectDetails(session.railwayToken, session.currentProjectId);
+  if (!details || !details.defaultEnvironmentId) {
+    await ctx.reply('❌ Environment नहीं मिला।');
+    return null;
+  }
+  const deployment = await getLatestDeployment(
+    session.railwayToken, session.currentProjectId, session.currentServiceId, details.defaultEnvironmentId
+  );
+  if (!deployment) {
+    await ctx.reply('❌ इस service में अभी तक कोई deployment नहीं हुई।');
+    return null;
+  }
+  return deployment;
+};
+
+// ------------------------------------------------------------
 // 🚀 Deployment — किसी एक चुनी हुई Service में
 // ------------------------------------------------------------
 const executeServiceDeploy = (ctx, session) => {
-  const userId = ctx.from.id;
   const tempDir = path.join(os.tmpdir(), `rd_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
   const files = getCurrentFiles(session);
 
@@ -332,7 +482,10 @@ const executeServiceDeploy = (ctx, session) => {
       await runRailwayCmd(projectToken, ['up', '--service', serviceId], tempDir);
 
       await fs.rm(tempDir, { recursive: true, force: true });
-      await ctx.reply(`✅ *Deployment triggered!*\nService: \`${serviceName}\` जल्द ही live होगी।`, { parse_mode: 'Markdown' });
+      await ctx.reply(
+        `✅ *Deployment triggered!*\nService: \`${serviceName}\` जल्द ही live होगी।\n\nअगर कुछ गड़बड़ हो तो "📜 View Logs" से चेक कर सकते हैं।`,
+        { parse_mode: 'Markdown' }
+      );
     } catch (err) {
       try { await fs.rm(tempDir, { recursive: true, force: true }); } catch (e) {}
       await ctx.reply(
@@ -354,7 +507,7 @@ bot.start((ctx) => {
     `/deploy - Projects खोलें / session शुरू करें\n` +
     `/status - Session status देखें\n` +
     `/reset - सब कुछ साफ़ करें\n\n` +
-    `📌 फ्लो: Projects → Services → Files → Deploy\n\n` +
+    `📌 फ्लो: Projects → Services → Files → Deploy → Logs\n\n` +
     `⚠️ *Files भेजते वक़्त ज़रूरी नियम:*\n` +
     `पूरा code अपने editor से एक ही बार में copy करें और एक ही बार में paste करके भेजें — चाहे कितना भी बड़ा हो। Telegram उसे खुद कई messages में बाँट देगा, बॉट उन्हें सही तरीके से वापस जोड़ लेगा।\n` +
     `❌ कोड को खुद मैन्युअली टुकड़ों में बाँटकर अलग-अलग बार paste ना करें — इससे lines टूट सकती हैं।`,
@@ -458,6 +611,12 @@ bot.action('backservices', async (ctx) => {
   ctx.answerCbQuery();
 });
 
+bot.action('backservicemenu', async (ctx) => {
+  const session = getSession(ctx.from.id);
+  await showServiceMenu(ctx, session);
+  ctx.answerCbQuery();
+});
+
 bot.action('delsvc', (ctx) => {
   const session = getSession(ctx.from.id);
   session.stage = 'waiting_delete_service_confirm';
@@ -489,7 +648,7 @@ bot.action('delfile', (ctx) => {
     return ctx.answerCbQuery();
   }
   session.stage = 'waiting_delete_filename';
-  ctx.reply(`🗑️ Delete करने के लिए exact filename टाइप करें।\nMौजूद: ${keys.join(', ')}`);
+  ctx.reply(`🗑️ Delete करने के लिए exact filename टाइप करें।\nमौजूद: ${keys.join(', ')}`);
   ctx.answerCbQuery();
 });
 
@@ -521,6 +680,75 @@ bot.action('deploy_yes', (ctx) => {
 bot.action('deploy_no', (ctx) => {
   ctx.reply('❌ Cancelled.');
   ctx.answerCbQuery();
+});
+
+// ---------------- LOGS BUTTONS ----------------
+
+bot.action('viewlogs', async (ctx) => {
+  const session = getSession(ctx.from.id);
+  await showLogsMenu(ctx, session);
+  ctx.answerCbQuery();
+});
+
+bot.action('logs_build', async (ctx) => {
+  const session = getSession(ctx.from.id);
+  ctx.answerCbQuery();
+  const deployment = await resolveLatestDeployment(ctx, session);
+  if (!deployment) return;
+  await ctx.reply(`🔨 *Build Logs* — deployment \`${deployment.id}\` (status: ${deployment.status})`, { parse_mode: 'Markdown' });
+  try {
+    const logs = await getBuildLogs(session.railwayToken, deployment.id);
+    await sendChunked(ctx, formatBuildOrRuntimeLogs(logs));
+  } catch (err) {
+    await ctx.reply(`❌ Logs नहीं मिले: ${err.message}`);
+  }
+});
+
+bot.action('logs_runtime', async (ctx) => {
+  const session = getSession(ctx.from.id);
+  ctx.answerCbQuery();
+  const deployment = await resolveLatestDeployment(ctx, session);
+  if (!deployment) return;
+  await ctx.reply(`🚀 *Deploy/Runtime Logs* — deployment \`${deployment.id}\` (status: ${deployment.status})`, { parse_mode: 'Markdown' });
+  try {
+    const logs = await getRuntimeLogs(session.railwayToken, deployment.id);
+    await sendChunked(ctx, formatBuildOrRuntimeLogs(logs));
+  } catch (err) {
+    await ctx.reply(`❌ Logs नहीं मिले: ${err.message}`);
+  }
+});
+
+bot.action('logs_http', async (ctx) => {
+  const session = getSession(ctx.from.id);
+  ctx.answerCbQuery();
+  const deployment = await resolveLatestDeployment(ctx, session);
+  if (!deployment) return;
+  await ctx.reply(`🌐 *Network (HTTP) Logs* — deployment \`${deployment.id}\``, { parse_mode: 'Markdown' });
+  try {
+    const logs = await getHttpLogs(session.railwayToken, deployment.id);
+    await sendChunked(ctx, formatHttpLogs(logs));
+  } catch (err) {
+    await ctx.reply(`❌ Logs नहीं मिले: ${err.message}`);
+  }
+});
+
+bot.action('logs_status', async (ctx) => {
+  const session = getSession(ctx.from.id);
+  ctx.answerCbQuery();
+  const deployment = await resolveLatestDeployment(ctx, session);
+  if (!deployment) return;
+  try {
+    const full = await getDeploymentStatus(session.railwayToken, deployment.id);
+    await ctx.reply(
+      `📊 *Deployment Status*\n\n` +
+      `ID: \`${full.id}\`\nStatus: *${full.status}*\nबना: ${formatTime(full.createdAt)}\n` +
+      (full.url ? `URL: ${full.url}\n` : '') +
+      (full.staticUrl ? `Static URL: ${full.staticUrl}` : ''),
+      { parse_mode: 'Markdown' }
+    );
+  } catch (err) {
+    await ctx.reply(`❌ Status नहीं मिला: ${err.message}`);
+  }
 });
 
 bot.action('reset_session', (ctx) => {
